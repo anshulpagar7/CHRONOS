@@ -3,11 +3,8 @@
 namespace chronos {
 
     Scheduler::Scheduler()
-        : base_backoff(std::chrono::milliseconds(1000)) {} // 1 second
+        : base_backoff(std::chrono::milliseconds(1000)) {}
 
-    // ---------------------------
-    // Submit job
-    // ---------------------------
     void Scheduler::submit(const Job& job) {
         Job new_job = job;
         new_job.state = JobState::QUEUED;
@@ -16,9 +13,6 @@ namespace chronos {
         ready_queue.push(new_job);
     }
 
-    // ---------------------------
-    // Get next ready job
-    // ---------------------------
     bool Scheduler::get_next_job(Job& job_out) {
         process_retries();
 
@@ -39,9 +33,6 @@ namespace chronos {
         return true;
     }
 
-    // ---------------------------
-    // Mark completed
-    // ---------------------------
     void Scheduler::mark_completed(uint64_t job_id) {
         auto it = jobs.find(job_id);
         if (it != jobs.end()) {
@@ -49,14 +40,9 @@ namespace chronos {
         }
     }
 
-    // ---------------------------
-    // Mark failed (retry logic)
-    // ---------------------------
     void Scheduler::mark_failed(uint64_t job_id) {
         auto it = jobs.find(job_id);
-        if (it == jobs.end()) {
-            return;
-        }
+        if (it == jobs.end()) return;
 
         Job& job = it->second;
         job.current_retry++;
@@ -74,25 +60,18 @@ namespace chronos {
         }
     }
 
-    // ---------------------------
-    // Move retry-ready jobs back to ready queue
-    // ---------------------------
     void Scheduler::process_retries() {
         auto now = std::chrono::steady_clock::now();
 
         while (!retry_queue.empty()) {
             Job job = retry_queue.top();
 
-            if (job.next_retry_time > now) {
-                break;
-            }
+            if (job.next_retry_time > now) break;
 
             retry_queue.pop();
 
             auto it = jobs.find(job.job_id);
-            if (it == jobs.end()) {
-                continue;
-            }
+            if (it == jobs.end()) continue;
 
             it->second.state = JobState::QUEUED;
             ready_queue.push(it->second);

@@ -11,14 +11,39 @@
 
 namespace chronos {
 
-    // Comparator for ready jobs (priority-based for now)
+    // -----------------------------------
+    // Smart scheduling comparator
+    // -----------------------------------
     struct JobComparator {
         bool operator()(const Job& a, const Job& b) const {
-            return a.priority < b.priority; // higher priority first
+            auto now = std::chrono::steady_clock::now();
+
+            // ---------- Priority ----------
+            double score_a = a.priority;
+            double score_b = b.priority;
+
+            // ---------- Deadline urgency ----------
+            auto da = std::chrono::duration_cast<std::chrono::milliseconds>(
+                a.deadline - now).count();
+            auto db = std::chrono::duration_cast<std::chrono::milliseconds>(
+                b.deadline - now).count();
+
+            if (da > 0) score_a += 10000.0 / da;
+            if (db > 0) score_b += 10000.0 / db;
+
+            // ---------- Fairness / aging ----------
+            auto wa = std::chrono::duration_cast<std::chrono::seconds>(
+                now - a.submit_time).count();
+            auto wb = std::chrono::duration_cast<std::chrono::seconds>(
+                now - b.submit_time).count();
+
+            score_a += wa * 0.5;
+            score_b += wb * 0.5;
+
+            return score_a < score_b; // max-heap behavior
         }
     };
 
-    // Comparator for retry queue (earliest retry time first)
     struct RetryComparator {
         bool operator()(const Job& a, const Job& b) const {
             return a.next_retry_time > b.next_retry_time;
