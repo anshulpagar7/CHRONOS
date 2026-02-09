@@ -2,56 +2,46 @@
 
 namespace chronos {
 
-    // -----------------------------------
-    // Submit a new job
-    // -----------------------------------
+    Scheduler::Scheduler()
+        : base_backoff(std::chrono::milliseconds(1000)) {} // 1 second
+
+    // ---------------------------
+    // Submit job
+    // ---------------------------
     void Scheduler::submit(const Job& job) {
-        // Store job in lookup table
-        jobs[job.job_id] = job;
+        Job new_job = job;
+        new_job.state = JobState::QUEUED;
 
-        // Push job into scheduling queue
-        job_queue.push(job);
-
-        // Update state
-        jobs[job.job_id].state = JobState::QUEUED;
+        jobs[job.job_id] = new_job;
+        ready_queue.push(new_job);
     }
 
-    // -----------------------------------
-    // Get next job to execute
-    // -----------------------------------
+    // ---------------------------
+    // Get next ready job
+    // ---------------------------
     bool Scheduler::get_next_job(Job& job_out) {
-        if (job_queue.empty()) {
+        process_retries();
+
+        if (ready_queue.empty()) {
             return false;
         }
 
-        // Fetch highest priority job
-        Job next_job = job_queue.top();
-        job_queue.pop();
+        Job job = ready_queue.top();
+        ready_queue.pop();
 
-        // Update state
-        auto it = jobs.find(next_job.job_id);
-        if (it != jobs.end()) {
-            it->second.state = JobState::RUNNING;
-            job_out = it->second;
-            return true;
+        auto it = jobs.find(job.job_id);
+        if (it == jobs.end()) {
+            return false;
         }
 
-        return false;
+        it->second.state = JobState::RUNNING;
+        job_out = it->second;
+        return true;
     }
 
-    // -----------------------------------
-    // Mark job as running
-    // -----------------------------------
-    void Scheduler::mark_running(uint64_t job_id) {
-        auto it = jobs.find(job_id);
-        if (it != jobs.end()) {
-            it->second.state = JobState::RUNNING;
-        }
-    }
-
-    // -----------------------------------
-    // Mark job as completed
-    // -----------------------------------
+    // ---------------------------
+    // Mark completed
+    // ---------------------------
     void Scheduler::mark_completed(uint64_t job_id) {
         auto it = jobs.find(job_id);
         if (it != jobs.end()) {
@@ -59,21 +49,58 @@ namespace chronos {
         }
     }
 
-    // -----------------------------------
-    // Mark job as failed
-    // -----------------------------------
+    // ---------------------------
+    // Mark failed (retry logic)
+    // ---------------------------
     void Scheduler::mark_failed(uint64_t job_id) {
         auto it = jobs.find(job_id);
-        if (it != jobs.end()) {
-            it->second.state = JobState::FAILED;
+        if (it == jobs.end()) {
+            return;
+        }
+
+        Job& job = it->second;
+        job.current_retry++;
+
+        if (job.current_retry <= job.max_retries) {
+            job.state = JobState::RETRYING;
+
+            auto now = std::chrono::steady_clock::now();
+            auto delay = base_backoff * (1 << (job.current_retry - 1));
+
+            job.next_retry_time = now + delay;
+            retry_queue.push(job);
+        } else {
+            job.state = JobState::FAILED;
         }
     }
 
-    // -----------------------------------
-    // Check if scheduler has jobs
-    // -----------------------------------
+    // ---------------------------
+    // Move retry-ready jobs back to ready queue
+    // ---------------------------
+    void Scheduler::process_retries() {
+        auto now = std::chrono::steady_clock::now();
+
+        while (!retry_queue.empty()) {
+            Job job = retry_queue.top();
+
+            if (job.next_retry_time > now) {
+                break;
+            }
+
+            retry_queue.pop();
+
+            auto it = jobs.find(job.job_id);
+            if (it == jobs.end()) {
+                continue;
+            }
+
+            it->second.state = JobState::QUEUED;
+            ready_queue.push(it->second);
+        }
+    }
+
     bool Scheduler::has_jobs() const {
-        return !job_queue.empty();
+        return !ready_queue.empty() || !retry_queue.empty();
     }
 
 } // namespace chronos
