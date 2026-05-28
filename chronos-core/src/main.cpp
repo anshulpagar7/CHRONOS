@@ -1,34 +1,70 @@
 #include <iostream>
 #include <chrono>
+#include <thread>
 
 #include "scheduler.h"
+#include "worker_pool.h"
 
 using namespace chronos;
 
 int main() {
+
+    // -----------------------------------
+    // Create scheduler
+    // -----------------------------------
     Scheduler scheduler;
+
+    // -----------------------------------
+    // Create worker pool
+    // -----------------------------------
+    WorkerPool pool(3, scheduler);
+
+    // Start workers
+    pool.start();
 
     auto now = std::chrono::steady_clock::now();
 
-    // Create some test jobs
-    Job job1(1, 10, now, now + std::chrono::seconds(10), 3, 1, 256);
-    Job job2(2, 5,  now, now + std::chrono::seconds(20), 3, 1, 256);
-    Job job3(3, 20, now, now + std::chrono::seconds(5),  3, 1, 256);
-
+    // -----------------------------------
     // Submit jobs
-    scheduler.submit(job1);
-    scheduler.submit(job2);
-    scheduler.submit(job3);
+    // -----------------------------------
+    for (uint64_t i = 1; i <= 15; ++i) {
 
-    // Fetch jobs in scheduling order
-    Job next;
-    while (scheduler.get_next_job(next)) {
-        std::cout << "Executing Job ID: " << next.job_id
-                  << " | Priority: " << next.priority << std::endl;
+        int priority = (i % 5) + 1;
 
-        // Simulate success
-        scheduler.mark_completed(next.job_id);
+        Job job(
+            i,
+            priority,
+            now,
+            now + std::chrono::seconds(20),
+            3,      // max retries
+            1,      // cpu units
+            256     // memory
+        );
+
+        scheduler.submit(job);
+
+        std::cout
+            << "[Main] Submitted Job "
+            << i
+            << " with priority "
+            << priority
+            << std::endl;
     }
+
+    // -----------------------------------
+    // Let workers process jobs
+    // -----------------------------------
+    std::this_thread::sleep_for(
+        std::chrono::seconds(15));
+
+    // -----------------------------------
+    // Shutdown worker pool
+    // -----------------------------------
+    pool.stop();
+
+    std::cout
+        << "\nCHRONOS shutdown complete."
+        << std::endl;
 
     return 0;
 }
