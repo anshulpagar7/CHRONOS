@@ -3,258 +3,691 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CHRONOS — scheduler</title>
+<title>CHRONOS — a distributed task scheduling engine</title>
+<meta name="description" content="CHRONOS: a production-inspired distributed task scheduling engine in modern C++20. Resource-aware dispatch, crash recovery, backfill reservations, and a deterministic policy simulator.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --canvas: #0B0E14;
-    --panel: #11151E;
-    --panel-2: #151B26;
-    --line: #1E2430;
-    --text: #E6EAF2;
-    --muted: #8A93A6;
-    --faint: #545E72;
-    --brass: #E8A33D;        /* the one loud thing: time, activity, running */
-    --brass-dim: #8A6425;
-    --queued: #5B8DEF;
-    --dispatched: #7FA6F5;
-    --completed: #3FB68B;
-    --failed: #E05D5D;
-    --retry: #B583E0;
-    --cancelled: #6B7385;
-    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-    --sans: 'Space Grotesk', system-ui, -apple-system, sans-serif;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { color-scheme: dark; }
-  body {
-    background: var(--canvas); color: var(--text);
-    font-family: var(--sans); font-size: 14px; line-height: 1.45;
-    min-height: 100vh;
-  }
-  a { color: inherit; }
-  button { font: inherit; color: inherit; cursor: pointer; }
-  :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 4px; }
+/* ==========================================================================
+   CHRONOS console. One file, no build step, no dependencies.
+   Visual thesis: the page is a chronograph. Scroll is time passing.
+   ========================================================================== */
+:root {
+  --void: #06080C;
+  --canvas: #0A0D13;
+  --panel: #10141D;
+  --panel-2: #151A25;
+  --line: #1D2330;
+  --line-2: #2A3242;
+  --text: #E9EDF5;
+  --muted: #8A93A6;
+  --faint: #4E5768;
 
-  /* ---- chronograph backdrop (scroll-reactive) --------------------------- */
-  .dial {
-    position: fixed; pointer-events: none; z-index: 0;
-    opacity: .05; will-change: transform;
-  }
-  #dial-a { width: 880px; height: 880px; top: -260px; right: -300px; }
-  #dial-b { width: 430px; height: 430px; bottom: -140px; left: -140px; opacity: .04; }
-  main, header { position: relative; z-index: 1; }
+  --brass: #E8A33D;
+  --brass-hi: #F7CE83;
+  --brass-dim: #7A5A22;
 
-  /* ---- header ---------------------------------------------------------- */
-  header {
-    display: flex; align-items: center; gap: 20px;
-    padding: 14px 24px; border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; background: rgba(11,14,20,.92);
-    backdrop-filter: blur(6px); z-index: 10;
-  }
-  .brand { display: flex; align-items: center; gap: 12px; }
-  .wordmark { font-weight: 700; letter-spacing: .14em; font-size: 15px; }
-  .wordmark .k { color: var(--brass); }
-  /* the header chronometer */
-  #watch { width: 34px; height: 34px; flex: none; }
-  #watch .hand { transform-origin: 50% 50%; }
-  .uptime {
-    font-family: var(--mono); font-size: 12.5px; color: var(--muted);
-    display: flex; align-items: center; gap: 8px;
-  }
-  .uptime b { color: var(--text); font-weight: 500; }
-  .conn { width: 8px; height: 8px; border-radius: 50%; background: var(--completed); }
-  .conn.down { background: var(--failed); }
-  @media (prefers-reduced-motion: no-preference) {
-    .conn { animation: beat 2.4s ease-in-out infinite; }
-    @keyframes beat { 50% { opacity: .45; } }
-    /* the Running node breathes while work is executing */
-    .pipeline .node .tick.live { animation: glow 2.6s ease-in-out infinite; }
-    @keyframes glow {
-      50% { box-shadow: 0 0 14px 1px rgba(232, 163, 61, .55); }
-    }
-  }
-  header .spacer { flex: 1; }
-  .btn {
-    background: var(--panel-2); border: 1px solid var(--line);
-    border-radius: 6px; padding: 7px 14px; font-size: 13px; font-weight: 500;
-  }
-  .btn:hover { border-color: var(--faint); }
-  .btn.primary { background: var(--brass); border-color: var(--brass); color: #14100A; font-weight: 700; }
-  .btn.primary:hover { filter: brightness(1.08); }
+  --queued: #5B8DEF;
+  --dispatched: #7FA6F5;
+  --running: #E8A33D;
+  --completed: #3FB68B;
+  --failed: #E05D5D;
+  --retry: #B583E0;
+  --cancelled: #6B7385;
+  --submitted: #8A93A6;
 
-  main { max-width: 1240px; margin: 0 auto; padding: 24px; display: grid; gap: 18px; }
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+}
 
-  /* ---- scroll reveal + hover ------------------------------------------- */
-  section, .pipeline { transition: border-color .25s ease, transform .25s ease; }
-  section:hover { border-color: #2A3242; }
-  @media (prefers-reduced-motion: no-preference) {
-    .reveal { opacity: 0; transform: translateY(16px); }
-    .reveal.in {
-      opacity: 1; transform: none;
-      transition: opacity .7s cubic-bezier(.22,1,.36,1),
-                  transform .7s cubic-bezier(.22,1,.36,1),
-                  border-color .25s ease;
-    }
-  }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { color-scheme: dark; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
-  /* ---- odometer digits --------------------------------------------------
-     Counts roll like a departure board: each digit is a vertical strip of
-     0-9 translated to the current value. */
-  .odo { display: inline-flex; overflow: hidden; height: 36px; }
-  .odo-col { display: flex; flex-direction: column; }
-  .odo-col span { height: 36px; line-height: 36px; display: block; }
-  @media (prefers-reduced-motion: no-preference) {
-    .odo-col { transition: transform .65s cubic-bezier(.3, 1.1, .3, 1); }
-  }
+body {
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  overflow-x: hidden;
+  /* faint vignette + brass bloom at the top, like glass over a watch face */
+  background-image:
+    radial-gradient(900px 520px at 78% -8%, rgba(232,163,61,.10), transparent 62%),
+    radial-gradient(720px 480px at 8% 4%, rgba(91,141,239,.07), transparent 60%);
+  background-attachment: fixed;
+}
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; }
+:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 6px; }
+::selection { background: rgba(232,163,61,.28); }
 
-  /* ---- signature: the live state machine ------------------------------- */
-  .pipeline {
-    display: flex; align-items: stretch; gap: 0;
-    border: 1px solid var(--line); border-radius: 10px;
-    background: linear-gradient(180deg, var(--panel) 0%, var(--canvas) 140%);
-    padding: 22px 18px 18px; overflow-x: auto;
-  }
-  .node { flex: 1; min-width: 118px; position: relative; padding: 0 14px; }
-  .node + .node::before {
-    content: ""; position: absolute; left: -14px; top: 26px;
-    width: 28px; height: 1px; background: var(--line);
-  }
-  .node + .node::after {
-    content: ""; position: absolute; left: 10px; top: 23px;
-    width: 6px; height: 6px; border-top: 1px solid var(--faint);
-    border-right: 1px solid var(--faint); transform: rotate(45deg);
-  }
-  .node .count {
-    font-family: var(--mono); font-size: 30px; font-weight: 500;
-    font-variant-numeric: tabular-nums; line-height: 36px; height: 36px;
-  }
-  .node .label {
-    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
-    color: var(--muted); margin-top: 2px;
-  }
-  .node .tick { width: 22px; height: 3px; border-radius: 2px; margin-bottom: 10px; }
-  .branches { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-  .chip {
-    font-family: var(--mono); font-size: 11.5px; padding: 3px 8px;
-    border-radius: 5px; border: 1px solid var(--line); color: var(--muted);
-    background: var(--canvas);
-  }
-  .chip b { font-weight: 500; }
+/* thin brass scrollbar */
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: var(--void); }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 6px; border: 3px solid var(--void); }
+::-webkit-scrollbar-thumb:hover { background: var(--brass-dim); }
 
-  /* ---- panels grid ------------------------------------------------------ */
-  .row { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; }
-  @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
-  section {
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 16px 18px;
-  }
-  section h2 {
-    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
-    color: var(--muted); font-weight: 500; margin-bottom: 12px;
-    display: flex; justify-content: space-between; align-items: baseline;
-  }
-  section h2 .sub { font-family: var(--mono); text-transform: none; letter-spacing: 0; color: var(--faint); font-size: 11.5px; }
+/* ---------- shared ------------------------------------------------------- */
+.wrap { width: min(1240px, 100% - 44px); margin-inline: auto; }
+.eyebrow {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .22em;
+  text-transform: uppercase; color: var(--brass); display: flex;
+  align-items: center; gap: 10px;
+}
+.eyebrow::before {
+  content: ""; width: 26px; height: 1px; background: var(--brass); opacity: .6;
+}
+.section-title {
+  font-size: clamp(26px, 3.6vw, 40px); font-weight: 600; letter-spacing: -.02em;
+  margin: 14px 0 10px; line-height: 1.12;
+}
+.section-lede { color: var(--muted); max-width: 60ch; font-size: 16px; }
+section.band { padding: clamp(72px, 11vw, 130px) 0; position: relative; }
 
-  /* sparkline */
-  #spark { width: 100%; height: 130px; display: block; }
-  .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
-  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+/* ---------- fixed chrome ------------------------------------------------- */
+header {
+  position: fixed; inset: 0 0 auto 0; z-index: 40;
+  display: flex; align-items: center; gap: 18px;
+  padding: 12px max(22px, calc((100vw - 1240px) / 2));
+  border-bottom: 1px solid transparent;
+  transition: background .35s var(--ease), border-color .35s var(--ease), backdrop-filter .35s;
+}
+header.stuck {
+  background: rgba(6,8,12,.82); backdrop-filter: blur(14px) saturate(1.3);
+  border-bottom-color: var(--line);
+}
+.brand { display: flex; align-items: center; gap: 11px; }
+#watch-mini { width: 30px; height: 30px; flex: none; }
+.wordmark { font-weight: 700; letter-spacing: .17em; font-size: 14.5px; }
+.wordmark .k { color: var(--brass); }
+header .grow { flex: 1; }
+.uptime {
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  display: flex; align-items: center; gap: 8px;
+}
+.uptime b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.conn { width: 7px; height: 7px; border-radius: 50%; background: var(--completed); flex: none; }
+.conn.down { background: var(--failed); }
+@media (prefers-reduced-motion: no-preference) {
+  .conn { animation: beat 2.4s ease-in-out infinite; }
+  @keyframes beat { 50% { opacity: .35; transform: scale(.82); } }
+}
+.btn {
+  border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 16px;
+  font-size: 13.5px; font-weight: 500; background: var(--panel-2);
+  transition: border-color .2s, background .2s, transform .2s var(--ease);
+}
+.btn:hover { border-color: var(--faint); transform: translateY(-1px); }
+.btn.primary {
+  background: linear-gradient(180deg, var(--brass-hi), var(--brass));
+  border-color: var(--brass); color: #1A1206; font-weight: 700;
+  box-shadow: 0 6px 22px -10px rgba(232,163,61,.8);
+}
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.ghost { background: none; }
 
-  /* workers */
-  .worker { padding: 10px 0; border-top: 1px solid var(--line); }
-  .worker:first-of-type { border-top: 0; padding-top: 2px; }
-  .worker .head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12.5px; margin-bottom: 7px; }
-  .worker .head .dead { color: var(--failed); }
-  .bar { height: 5px; background: var(--canvas); border-radius: 3px; overflow: hidden; margin: 5px 0; }
-  .bar i { display: block; height: 100%; border-radius: 3px; background: var(--brass); transition: width .5s ease; }
-  .bar.mem i { background: var(--queued); }
-  .worker .caption { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); }
-  .reservation-note {
-    margin-top: 10px; padding: 8px 10px; border: 1px dashed var(--brass-dim);
-    border-radius: 6px; font-family: var(--mono); font-size: 12px; color: var(--brass);
-  }
+/* scroll progress ring in the header */
+#progress-ring { width: 26px; height: 26px; flex: none; }
+#progress-ring circle { fill: none; stroke-width: 2.5; }
+#progress-ring .track { stroke: var(--line-2); }
+#progress-ring .fill {
+  stroke: var(--brass); stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: 50% 50%;
+}
 
-  /* jobs table */
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
-       color: var(--faint); font-weight: 500; padding: 4px 8px 8px; }
-  td { padding: 7px 8px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
-  td.mono, th.mono { font-family: var(--mono); font-size: 12.5px; }
-  .pill {
-    font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px;
-    border: 1px solid; display: inline-block;
-  }
-  .cancel {
-    background: none; border: 1px solid var(--line); border-radius: 5px;
-    width: 22px; height: 22px; line-height: 1; color: var(--muted); font-size: 12px;
-  }
-  .cancel:hover { border-color: var(--failed); color: var(--failed); }
-  .empty { color: var(--faint); padding: 18px 8px; font-size: 13px; }
+/* ---------- scroll chronometer (bottom-right needle dial) ---------------- */
+#scrub {
+  position: fixed; right: 26px; bottom: 26px; z-index: 35;
+  width: 86px; height: 86px; opacity: 0; transform: scale(.75) translateY(12px);
+  transition: opacity .5s var(--ease), transform .5s var(--ease);
+  pointer-events: none;
+}
+#scrub.on { opacity: 1; transform: none; }
+#scrub text { font-family: var(--mono); font-size: 13px; fill: var(--text); }
+#scrub .cap { font-size: 6.4px; fill: var(--faint); letter-spacing: .18em; }
+@media (max-width: 720px) { #scrub { display: none; } }
 
-  /* event feed */
-  .feed { font-family: var(--mono); font-size: 12px; max-height: 420px; overflow-y: auto; }
-  .evt { display: flex; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); align-items: baseline; }
-  .evt:first-child { border-top: 0; }
-  .evt .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; position: relative; top: 1px; }
-  .evt .when { color: var(--faint); margin-left: auto; flex: none; font-size: 11px; }
-  .evt .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .evt .what b { color: var(--text); font-weight: 500; }
-  @media (prefers-reduced-motion: no-preference) {
-    .evt.fresh { animation: settle .5s ease; }
-    @keyframes settle { from { opacity: 0; transform: translateY(-3px); } }
-  }
+/* ---------- background dials --------------------------------------------- */
+.dial-bg { position: fixed; pointer-events: none; z-index: 0; color: #7A869C; opacity: .055; will-change: transform; }
+#dial-a { width: 1020px; height: 1020px; top: -300px; right: -330px; }
+#dial-b { width: 560px; height: 560px; bottom: -190px; left: -200px; opacity: .04; }
+header, main, footer { position: relative; z-index: 2; }
 
-  /* submit drawer */
-  #drawer { display: none; }
-  #drawer.open { display: block; }
-  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-  label { display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
-  input[type=text], input[type=number] {
-    width: 100%; background: var(--canvas); border: 1px solid var(--line);
-    border-radius: 6px; padding: 8px 10px; color: var(--text);
-    font-family: var(--mono); font-size: 13px;
+/* ---------- hero ---------------------------------------------------------- */
+#hero {
+  min-height: 100svh; display: grid; align-items: center;
+  padding: 118px 0 70px;
+}
+.hero-grid { display: grid; grid-template-columns: 1.08fr .92fr; gap: 54px; align-items: center; }
+@media (max-width: 940px) { .hero-grid { grid-template-columns: 1fr; gap: 40px; } }
+
+.hero-title {
+  font-size: clamp(46px, 8.4vw, 96px); line-height: .94; font-weight: 700;
+  letter-spacing: -.045em; margin: 20px 0 0;
+}
+.hero-title .o {
+  color: var(--brass);
+  text-shadow: 0 0 42px rgba(232,163,61,.45);
+}
+.hero-sub {
+  margin-top: 22px; font-size: clamp(16px, 1.7vw, 19px); color: var(--muted);
+  max-width: 54ch;
+}
+.hero-sub b { color: var(--text); font-weight: 500; }
+.hero-cta { display: flex; gap: 12px; margin-top: 30px; flex-wrap: wrap; }
+
+.stats { display: flex; gap: 34px; margin-top: 42px; flex-wrap: wrap; }
+.stat .v {
+  font-family: var(--mono); font-size: 27px; font-weight: 500;
+  font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+}
+.stat .v .u { color: var(--brass); }
+.stat .l {
+  font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--faint); margin-top: 3px;
+}
+
+/* the big hero chronometer */
+.watch-stage { display: grid; place-items: center; position: relative; }
+#watch-hero { width: min(420px, 84vw); height: min(420px, 84vw); }
+.watch-glow {
+  position: absolute; inset: 12%;
+  background: radial-gradient(circle, rgba(232,163,61,.16), transparent 66%);
+  filter: blur(26px); pointer-events: none;
+}
+#watch-hero .hand { transform-origin: 100px 100px; }
+
+.scroll-cue {
+  display: flex; align-items: center; gap: 10px; margin-top: 54px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .2em;
+  text-transform: uppercase; color: var(--faint);
+}
+.scroll-cue .rail {
+  width: 1px; height: 42px; background: linear-gradient(var(--brass), transparent);
+  position: relative; overflow: hidden;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .scroll-cue .rail::after {
+    content: ""; position: absolute; inset-inline: 0; height: 12px;
+    background: var(--brass-hi); animation: drop 2.1s var(--ease) infinite;
   }
-  input:focus { border-color: var(--brass); outline: none; }
-  .check { display: flex; align-items: center; gap: 8px; padding-top: 22px; }
-  .check label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
-  .form-actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
-  #submit-note { font-family: var(--mono); font-size: 12px; color: var(--completed); }
-  #submit-note.err { color: var(--failed); }
+  @keyframes drop { 0% { top: -14px; opacity: 0; } 30% { opacity: 1; } 100% { top: 44px; opacity: 0; } }
+}
+
+/* ---------- reveals ------------------------------------------------------- */
+@media (prefers-reduced-motion: no-preference) {
+  .rv { opacity: 0; transform: translateY(26px); }
+  .rv.in {
+    opacity: 1; transform: none;
+    transition: opacity .85s var(--ease), transform .85s var(--ease);
+  }
+  .rv-l { opacity: 0; transform: translateX(-22px); }
+  .rv-l.in { opacity: 1; transform: none; transition: opacity .8s var(--ease), transform .8s var(--ease); }
+}
+
+/* ---------- feature cards ------------------------------------------------- */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 46px; }
+@media (max-width: 980px) { .cards { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 620px) { .cards { grid-template-columns: 1fr; } }
+.card {
+  border: 1px solid var(--line); border-radius: 14px; padding: 22px 20px 20px;
+  background: linear-gradient(168deg, var(--panel) 0%, rgba(10,13,19,.7) 100%);
+  position: relative; overflow: hidden;
+  transition: border-color .3s, transform .35s var(--ease), box-shadow .35s var(--ease);
+}
+.card::after {
+  content: ""; position: absolute; inset: 0; border-radius: 14px; pointer-events: none;
+  background: radial-gradient(320px 160px at var(--mx, 50%) var(--my, 0%), rgba(232,163,61,.10), transparent 70%);
+  opacity: 0; transition: opacity .35s;
+}
+.card:hover { border-color: var(--line-2); transform: translateY(-4px); box-shadow: 0 22px 44px -30px rgba(0,0,0,.9); }
+.card:hover::after { opacity: 1; }
+.card .ic { width: 30px; height: 30px; color: var(--brass); margin-bottom: 15px; }
+.card h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: 7px; }
+.card p { color: var(--muted); font-size: 14px; }
+.card code {
+  font-family: var(--mono); font-size: 12.5px; color: var(--brass);
+  background: rgba(232,163,61,.08); padding: 1px 5px; border-radius: 4px;
+}
+
+/* ---------- lifecycle diagram --------------------------------------------- */
+.diagram-shell {
+  margin-top: 44px; border: 1px solid var(--line); border-radius: 16px;
+  background: linear-gradient(180deg, var(--panel), var(--canvas));
+  padding: 26px 20px 20px; overflow-x: auto;
+}
+#lifecycle-svg { width: 100%; min-width: 660px; height: 260px; display: block; }
+#lifecycle-svg .edge { fill: none; stroke: var(--line-2); stroke-width: 1.6; }
+#lifecycle-svg .edge.dash { stroke-dasharray: 5 5; }
+#lifecycle-svg .node-box { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1.4; }
+#lifecycle-svg .node-label { font-family: var(--mono); font-size: 11.5px; fill: var(--text); }
+#lifecycle-svg .edge-label { font-family: var(--mono); font-size: 9.5px; fill: var(--faint); }
+.diagram-legend {
+  display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px;
+  font-family: var(--mono); font-size: 11.5px; color: var(--faint);
+}
+.diagram-legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+/* ---------- benchmark bars ------------------------------------------------ */
+.bench { margin-top: 42px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.bench-head, .bench-row {
+  display: grid; grid-template-columns: 118px 1fr 84px 84px 74px;
+  gap: 14px; align-items: center; padding: 13px 20px;
+}
+@media (max-width: 780px) {
+  .bench-head, .bench-row { grid-template-columns: 92px 1fr 68px; }
+  .bench-head span:nth-child(4), .bench-row .hide-sm { display: none; }
+}
+.bench-head {
+  background: var(--panel-2); border-bottom: 1px solid var(--line);
+  font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint);
+}
+.bench-row { border-bottom: 1px solid var(--line); }
+.bench-row:last-child { border-bottom: 0; }
+.bench-row:hover { background: rgba(255,255,255,.014); }
+.bench-name { font-family: var(--mono); font-size: 13.5px; }
+.bench-name.win { color: var(--brass); }
+.bench-bar { height: 8px; background: var(--panel-2); border-radius: 5px; overflow: hidden; }
+.bench-bar i {
+  display: block; height: 100%; width: 0; border-radius: 5px;
+  background: linear-gradient(90deg, var(--brass-dim), var(--brass));
+  transition: width 1.25s var(--ease);
+}
+.bench-bar.alt i { background: linear-gradient(90deg, #2C4E86, var(--queued)); }
+.bench-num { font-family: var(--mono); font-size: 12.5px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.bench-note { color: var(--faint); font-size: 13px; margin-top: 14px; max-width: 74ch; }
+
+/* ---------- console ------------------------------------------------------- */
+#console { padding-top: clamp(60px, 8vw, 96px); }
+.console-head { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; }
+.console-head .grow { flex: 1; }
+
+.pipeline {
+  display: flex; align-items: stretch; margin-top: 34px;
+  border: 1px solid var(--line); border-radius: 14px;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--canvas) 150%);
+  padding: 24px 16px 20px; overflow-x: auto;
+}
+.node { flex: 1; min-width: 128px; position: relative; padding: 0 16px; }
+.node + .node::before {
+  content: ""; position: absolute; left: -14px; top: 27px; width: 28px; height: 1px; background: var(--line-2);
+}
+.node + .node::after {
+  content: ""; position: absolute; left: 10px; top: 24px; width: 6px; height: 6px;
+  border-top: 1px solid var(--faint); border-right: 1px solid var(--faint); transform: rotate(45deg);
+}
+.node .tick-bar { width: 24px; height: 3px; border-radius: 2px; margin-bottom: 11px; }
+.node .count {
+  font-family: var(--mono); font-size: 31px; font-weight: 500;
+  height: 38px; line-height: 38px; font-variant-numeric: tabular-nums;
+}
+.node .label { font-size: 10.5px; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+.branches { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.chip {
+  font-family: var(--mono); font-size: 11.5px; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--line-2); color: var(--muted); background: var(--void);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .tick-bar.live { animation: pulse 2.5s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 16px 1px rgba(232,163,61,.6); } }
+}
+
+/* odometer digits */
+.odo { display: inline-flex; overflow: hidden; height: 38px; }
+.odo-col { display: flex; flex-direction: column; }
+.odo-col span { height: 38px; line-height: 38px; display: block; }
+@media (prefers-reduced-motion: no-preference) {
+  .odo-col { transition: transform .7s cubic-bezier(.34, 1.2, .32, 1); }
+}
+
+.row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-top: 16px; }
+@media (max-width: 940px) { .row { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 17px 19px;
+  transition: border-color .25s;
+}
+.panel:hover { border-color: var(--line-2); }
+.panel h2 {
+  font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  font-weight: 500; margin-bottom: 13px; display: flex; justify-content: space-between; align-items: baseline;
+}
+.panel h2 .sub { font-family: var(--mono); text-transform: none; letter-spacing: 0; color: var(--faint); font-size: 11.5px; }
+
+#spark { width: 100%; height: 138px; display: block; }
+.legend { display: flex; gap: 18px; margin-top: 9px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 7px; vertical-align: middle; }
+
+.worker { padding: 11px 0; border-top: 1px solid var(--line); }
+.worker:first-of-type { border-top: 0; padding-top: 2px; }
+.worker .head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12.5px; margin-bottom: 8px; }
+.worker .head .dead { color: var(--failed); }
+.bar { height: 5px; background: var(--void); border-radius: 3px; overflow: hidden; margin: 5px 0; }
+.bar i { display: block; height: 100%; border-radius: 3px; background: var(--brass); transition: width .6s var(--ease); }
+.bar.mem i { background: var(--queued); }
+.worker .caption { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); }
+.reservation-note {
+  margin-top: 12px; padding: 9px 11px; border: 1px dashed var(--brass-dim);
+  border-radius: 8px; font-family: var(--mono); font-size: 12px; color: var(--brass);
+  background: rgba(232,163,61,.05);
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint); font-weight: 500; padding: 4px 8px 9px; }
+td { padding: 8px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+td.mono, th.mono { font-family: var(--mono); font-size: 12.5px; }
+.pill { font-family: var(--mono); font-size: 11px; padding: 2px 9px; border-radius: 999px; border: 1px solid; display: inline-block; }
+.x-btn { border: 1px solid var(--line-2); border-radius: 6px; width: 23px; height: 23px; line-height: 1; color: var(--muted); font-size: 12px; transition: .2s; }
+.x-btn:hover { border-color: var(--failed); color: var(--failed); }
+.empty { color: var(--faint); padding: 20px 8px; font-size: 13px; }
+
+.feed { font-family: var(--mono); font-size: 12px; max-height: 430px; overflow-y: auto; }
+.evt { display: flex; gap: 9px; padding: 6px 0; border-top: 1px solid var(--line); align-items: baseline; }
+.evt:first-child { border-top: 0; }
+.evt .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; position: relative; top: 1px; }
+.evt .when { color: var(--faint); margin-left: auto; flex: none; font-size: 11px; }
+.evt .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evt .what b { color: var(--text); font-weight: 500; }
+@media (prefers-reduced-motion: no-preference) {
+  .evt.fresh { animation: settle .55s var(--ease); }
+  @keyframes settle { from { opacity: 0; transform: translateX(-8px); } }
+}
+
+/* submit drawer */
+#drawer { display: none; margin-top: 16px; }
+#drawer.open { display: block; }
+@media (prefers-reduced-motion: no-preference) {
+  #drawer.open { animation: unfold .45s var(--ease); }
+  @keyframes unfold { from { opacity: 0; transform: translateY(-10px); } }
+}
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(146px, 1fr)); gap: 13px; }
+label { display: block; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+input[type=text], input[type=number] {
+  width: 100%; background: var(--void); border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 9px 11px; color: var(--text); font-family: var(--mono); font-size: 13px;
+  transition: border-color .2s;
+}
+input:focus { border-color: var(--brass); outline: none; }
+.check { display: flex; align-items: center; gap: 9px; padding-top: 23px; }
+.check label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
+.form-actions { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
+#submit-note { font-family: var(--mono); font-size: 12px; color: var(--completed); }
+#submit-note.err { color: var(--failed); }
+
+footer {
+  border-top: 1px solid var(--line); margin-top: 90px; padding: 34px 0 46px;
+  color: var(--faint); font-size: 13px;
+  display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap;
+}
+footer .mono { font-family: var(--mono); font-size: 12px; }
 </style>
 </head>
 <body>
 
-<svg id="dial-a" class="dial" viewBox="0 0 200 200" aria-hidden="true"></svg>
-<svg id="dial-b" class="dial" viewBox="0 0 200 200" aria-hidden="true"></svg>
+<svg id="dial-a" class="dial-bg" viewBox="0 0 200 200" aria-hidden="true"></svg>
+<svg id="dial-b" class="dial-bg" viewBox="0 0 200 200" aria-hidden="true"></svg>
 
-<header>
+<header id="topbar">
   <div class="brand">
-    <svg id="watch" viewBox="0 0 100 100" role="img" aria-label="Scheduler uptime chronometer">
-      <circle cx="50" cy="50" r="46" fill="var(--panel-2)" stroke="var(--brass-dim)" stroke-width="3"/>
-      <g id="watch-ticks" stroke="var(--faint)" stroke-width="2"></g>
-      <line id="hand-m" class="hand" x1="50" y1="50" x2="50" y2="20" stroke="var(--muted)" stroke-width="3.5" stroke-linecap="round"/>
-      <line id="hand-s" class="hand" x1="50" y1="56" x2="50" y2="14" stroke="var(--brass)" stroke-width="1.8" stroke-linecap="round"/>
-      <circle cx="50" cy="50" r="3.2" fill="var(--brass)"/>
+    <svg id="watch-mini" viewBox="0 0 100 100" role="img" aria-label="Live scheduler uptime">
+      <circle cx="50" cy="50" r="45" fill="var(--panel-2)" stroke="var(--brass-dim)" stroke-width="3"/>
+      <g id="mini-ticks" stroke="var(--faint)" stroke-width="2"></g>
+      <line id="mini-m" class="hand" x1="50" y1="50" x2="50" y2="22" stroke="var(--muted)" stroke-width="3.6" stroke-linecap="round"/>
+      <line id="mini-s" class="hand" x1="50" y1="57" x2="50" y2="15" stroke="var(--brass)" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="50" cy="50" r="3" fill="var(--brass)"/>
     </svg>
-    <div class="wordmark">CHR<span class="k">O</span>NOS</div>
+    <span class="wordmark">CHR<span class="k">O</span>NOS</span>
   </div>
-  <div class="uptime"><span class="conn" id="conn"></span> uptime <b id="uptime">—</b></div>
-  <div class="spacer"></div>
-  <button class="btn primary" id="toggle-drawer" aria-expanded="false">Submit job</button>
+  <span class="grow"></span>
+  <div class="uptime"><span class="conn" id="conn"></span>uptime&nbsp;<b id="uptime">—</b></div>
+  <svg id="progress-ring" viewBox="0 0 36 36" aria-hidden="true">
+    <circle class="track" cx="18" cy="18" r="15"/>
+    <circle class="fill" id="ring-fill" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="94.2"/>
+  </svg>
+  <a class="btn ghost" href="#console">Console</a>
 </header>
 
+<!-- scroll-scrubbed needle dial -->
+<svg id="scrub" viewBox="0 0 100 100" aria-hidden="true">
+  <circle cx="50" cy="50" r="45" fill="rgba(16,20,29,.86)" stroke="var(--line-2)" stroke-width="2"/>
+  <circle cx="50" cy="50" r="38" fill="none" stroke="var(--line)" stroke-width=".8" stroke-dasharray="1 4"/>
+  <g id="scrub-ticks" stroke="var(--faint)" stroke-width="1.4"></g>
+  <path id="scrub-arc" fill="none" stroke="var(--brass)" stroke-width="2.6" stroke-linecap="round"
+        d="" opacity=".9"/>
+  <line id="scrub-hand" x1="50" y1="52" x2="50" y2="18" stroke="var(--brass-hi)" stroke-width="2.2"
+        stroke-linecap="round" style="transform-origin:50px 50px"/>
+  <circle cx="50" cy="50" r="2.6" fill="var(--brass-hi)"/>
+  <text id="scrub-pct" x="50" y="72" text-anchor="middle">0%</text>
+  <text class="cap" x="50" y="82" text-anchor="middle">ELAPSED</text>
+</svg>
+
 <main>
-  <section id="drawer" aria-label="Submit a job">
+
+<!-- ============================ HERO ============================ -->
+<section id="hero" class="wrap">
+  <div class="hero-grid">
+    <div>
+      <div class="eyebrow">Distributed task scheduling engine</div>
+      <h1 class="hero-title">CHR<span class="o">O</span>NOS</h1>
+      <p class="hero-sub">
+        A production-inspired scheduler in <b>modern C++20</b>. Resource-aware dispatch across a
+        worker pool, deadline- and priority-driven policies, crash detection with automatic
+        job rescue, and Slurm-style backfill reservations — all provable with a
+        <b>deterministic simulator</b> that runs the real scheduling core on simulated time.
+      </p>
+      <div class="hero-cta">
+        <a class="btn primary" href="#console">Open live console</a>
+        <a class="btn" href="#proof">See the benchmarks</a>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><div class="v"><span class="cu" data-to="155">0</span></div><div class="l">tests passing</div></div>
+        <div class="stat"><div class="v"><span class="cu" data-to="49">0</span><span class="u">K</span></div><div class="l">jobs/sec · 1 core</div></div>
+        <div class="stat"><div class="v"><span class="cu" data-to="4">0</span></div><div class="l">scheduling policies</div></div>
+        <div class="stat"><div class="v"><span class="cu" data-to="0">0</span></div><div class="l">dependencies</div></div>
+      </div>
+
+      <div class="scroll-cue"><span class="rail"></span>scroll to begin</div>
+    </div>
+
+    <div class="watch-stage">
+      <div class="watch-glow"></div>
+      <svg id="watch-hero" viewBox="0 0 200 200" role="img" aria-label="Live chronometer showing scheduler uptime">
+        <defs>
+          <radialGradient id="face" cx="38%" cy="30%">
+            <stop offset="0%" stop-color="#1B2231"/>
+            <stop offset="72%" stop-color="#10141D"/>
+            <stop offset="100%" stop-color="#080B11"/>
+          </radialGradient>
+          <linearGradient id="bezel" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#F7CE83"/>
+            <stop offset="45%" stop-color="#8A6425"/>
+            <stop offset="100%" stop-color="#5A421A"/>
+          </linearGradient>
+        </defs>
+        <circle cx="100" cy="100" r="95" fill="none" stroke="url(#bezel)" stroke-width="3"/>
+        <circle cx="100" cy="100" r="88" fill="url(#face)" stroke="var(--line-2)" stroke-width="1"/>
+        <g id="hero-bezel"></g>
+        <g id="hero-ticks"></g>
+        <!-- subdial: live worker count -->
+        <circle cx="100" cy="140" r="20" fill="none" stroke="var(--line-2)" stroke-width=".9"/>
+        <text id="sub-workers" x="100" y="141" text-anchor="middle"
+              font-family="var(--mono)" font-size="11" fill="var(--text)">0</text>
+        <text x="100" y="151" text-anchor="middle" font-family="var(--mono)"
+              font-size="5" fill="var(--faint)" letter-spacing="1.4">WORKERS</text>
+        <!-- subdial: live running count -->
+        <circle cx="100" cy="62" r="20" fill="none" stroke="var(--line-2)" stroke-width=".9"/>
+        <text id="sub-running" x="100" y="63" text-anchor="middle"
+              font-family="var(--mono)" font-size="11" fill="var(--brass)">0</text>
+        <text x="100" y="73" text-anchor="middle" font-family="var(--mono)"
+              font-size="5" fill="var(--faint)" letter-spacing="1.4">RUNNING</text>
+
+        <line id="hero-h" class="hand" x1="100" y1="108" x2="100" y2="58"
+              stroke="var(--text)" stroke-width="4.6" stroke-linecap="round"/>
+        <line id="hero-m" class="hand" x1="100" y1="112" x2="100" y2="34"
+              stroke="var(--muted)" stroke-width="3.2" stroke-linecap="round"/>
+        <line id="hero-s" class="hand" x1="100" y1="118" x2="100" y2="22"
+              stroke="var(--brass)" stroke-width="1.5" stroke-linecap="round"/>
+        <circle cx="100" cy="100" r="4.4" fill="var(--brass)"/>
+        <circle cx="100" cy="100" r="1.6" fill="#0B0E14"/>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ WHAT IT IS ============================ -->
+<section class="band wrap" id="what">
+  <div class="rv">
+    <div class="eyebrow">What it is</div>
+    <h2 class="section-title">A scheduler that behaves like the real thing.</h2>
+    <p class="section-lede">
+      Jobs arrive with priorities, deadlines, and CPU/memory requirements. Workers advertise
+      capacity and heartbeat their liveness. The scheduler decides who runs what, when — and
+      keeps deciding correctly when workers die mid-job.
+    </p>
+  </div>
+
+  <div class="cards">
+    <article class="card rv">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>
+      </svg>
+      <h3>Single-threaded actor core</h3>
+      <p>One scheduler thread owns all state; everything else reaches it through a command queue.
+         <code>run_once(now)</code> is the entire scheduling iteration — which makes races
+         structurally impossible and the whole engine testable in a loop.</p>
+    </article>
+
+    <article class="card rv">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="6" rx="1.6"/><rect x="3" y="14" width="11" height="6" rx="1.6"/>
+      </svg>
+      <h3>Resource-aware dispatch</h3>
+      <p>Jobs declare CPU and memory; workers publish free capacity. A bounded skip-scan finds
+         the best job that actually <em>fits</em>, instead of head-of-line blocking on one
+         oversized task.</p>
+    </article>
+
+    <article class="card rv">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M12 3l8 4v6c0 4.4-3.4 7-8 8-4.6-1-8-3.6-8-8V7z"/><path d="M9.4 12l1.9 2 3.4-4"/>
+      </svg>
+      <h3>Crash detection &amp; rescue</h3>
+      <p>Missed heartbeats past the lease window mark a worker dead. Jobs it was running are
+         rescued back to the queue and re-dispatched elsewhere — proven by a chaos test that
+         kills a live worker mid-job.</p>
+    </article>
+
+    <article class="card rv">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M4 18V6M4 8h9l-2-2M4 14h13l-2-2"/><circle cx="19" cy="17" r="2.4"/>
+      </svg>
+      <h3>Backfill reservations</h3>
+      <p>When a large job is repeatedly jumped by smaller ones, the scheduler freezes capacity
+         on the biggest capable worker until it can run — Slurm's answer to starvation, in
+         about a hundred lines.</p>
+    </article>
+
+    <article class="card rv">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M3 17l5-6 4 3.4L21 6"/><path d="M15 6h6v6"/>
+      </svg>
+      <h3>Deterministic simulator</h3>
+      <p>The <em>production</em> scheduler driven on a simulated clock: 10,000 jobs and twelve
+         minutes of simulated time in about seven seconds — bit-identical for a given seed.</p>
+    </article>
+
+    <article class="card rv">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M8 4H5.5A1.5 1.5 0 004 5.5V9M16 4h2.5A1.5 1.5 0 0120 5.5V9M8 20H5.5A1.5 1.5 0 014 18.5V15M16 20h2.5a1.5 1.5 0 001.5-1.5V15"/>
+        <circle cx="12" cy="12" r="2.6"/>
+      </svg>
+      <h3>Zero dependencies</h3>
+      <p>Standard library only — including the JSON parser, HTTP server, and this page.
+         Clean builds under Debug, Release, ASan+UBSan, and TSan, all with
+         <code>-Werror</code>.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============================ LIFECYCLE ============================ -->
+<section class="band wrap" id="lifecycle">
+  <div class="rv">
+    <div class="eyebrow">The state machine</div>
+    <h2 class="section-title">Every job takes one legal path.</h2>
+    <p class="section-lede">
+      Eight states, enforced transitions, and a full history per job. Illegal moves are rejected
+      at the store — which is how a stale report from a worker presumed dead simply bounces off
+      instead of corrupting state.
+    </p>
+  </div>
+
+  <div class="diagram-shell rv">
+    <svg id="lifecycle-svg" viewBox="0 0 900 260" role="img"
+         aria-label="Job state machine: Submitted to Queued to Dispatched to Running, then Completed, retry, or failed">
+      <g id="lc-edges"></g>
+      <g id="lc-nodes"></g>
+      <circle id="lc-pulse" r="5.5" fill="var(--brass)" opacity="0">
+      </circle>
+    </svg>
+    <div class="diagram-legend">
+      <span><i style="background:var(--queued)"></i>waiting</span>
+      <span><i style="background:var(--running)"></i>executing</span>
+      <span><i style="background:var(--retry)"></i>backoff</span>
+      <span><i style="background:var(--completed)"></i>terminal · success</span>
+      <span><i style="background:var(--failed)"></i>terminal · dead-letter</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ PROOF ============================ -->
+<section class="band wrap" id="proof">
+  <div class="rv">
+    <div class="eyebrow">Evidence</div>
+    <h2 class="section-title">Four policies, one identical workload.</h2>
+    <p class="section-lede">
+      10,000 jobs at ~88% cluster utilization, replayed bit-for-bit under each policy. The
+      result reproduces classical scheduling theory on running code: FIFO is fairest but slowest
+      at the median; Priority starves its tail; EDF minimizes deadline misses; Composite takes
+      the best median while matching EDF.
+    </p>
+  </div>
+
+  <div class="bench rv" id="bench">
+    <div class="bench-head">
+      <span>policy</span><span>median wait (lower is better)</span>
+      <span class="bench-num">p50</span><span class="bench-num hide-sm">p99</span><span class="bench-num">miss</span>
+    </div>
+    <!-- rows injected -->
+  </div>
+  <p class="bench-note">
+    Reproduce with <code style="font-family:var(--mono);color:var(--brass)">./build/release/chronos-sim --compare --jobs=10000</code>
+    — same seed, same numbers, every run.
+  </p>
+</section>
+
+<!-- ============================ LIVE CONSOLE ============================ -->
+<section class="wrap" id="console">
+  <div class="console-head rv">
+    <div class="grow">
+      <div class="eyebrow">Live</div>
+      <h2 class="section-title">The engine, right now.</h2>
+      <p class="section-lede">Everything below is polled from the running daemon over its REST API.</p>
+    </div>
+    <button class="btn primary" id="toggle-drawer" aria-expanded="false">Submit a job</button>
+  </div>
+
+  <section class="panel" id="drawer" aria-label="Submit a job">
     <h2>New job</h2>
     <div class="form-grid">
       <div><label for="f-name">Name</label><input type="text" id="f-name" value="encode-video"></div>
       <div><label for="f-priority">Priority 0–9</label><input type="number" id="f-priority" value="5" min="0" max="9"></div>
       <div><label for="f-cpu">CPU units</label><input type="number" id="f-cpu" value="2" min="1"></div>
       <div><label for="f-mem">Memory MB</label><input type="number" id="f-mem" value="128" min="1"></div>
-      <div><label for="f-duration">Duration ms</label><input type="number" id="f-duration" value="800" min="0"></div>
-      <div><label for="f-deadline">Deadline ms (blank = none)</label><input type="number" id="f-deadline" placeholder="none"></div>
+      <div><label for="f-duration">Duration ms</label><input type="number" id="f-duration" value="1500" min="0"></div>
+      <div><label for="f-deadline">Deadline in ms</label><input type="number" id="f-deadline" placeholder="none"></div>
       <div><label for="f-retries">Max retries</label><input type="number" id="f-retries" value="2" min="0"></div>
       <div class="check"><input type="checkbox" id="f-fail"><label for="f-fail">Fail first attempt</label></div>
     </div>
@@ -264,20 +697,19 @@
     </div>
   </section>
 
-  <!-- signature element: the job state machine, live -->
-  <div class="pipeline reveal" aria-label="Job state machine">
+  <div class="pipeline rv" aria-label="Live job state counts">
     <div class="node">
-      <div class="tick" style="background:var(--queued)"></div>
+      <div class="tick-bar" style="background:var(--queued)"></div>
       <div class="count" id="n-queued">—</div>
       <div class="label">Queued</div>
     </div>
     <div class="node">
-      <div class="tick" style="background:var(--dispatched)"></div>
+      <div class="tick-bar" style="background:var(--dispatched)"></div>
       <div class="count" id="n-dispatched">—</div>
       <div class="label">Dispatched</div>
     </div>
     <div class="node">
-      <div class="tick" id="tick-running" style="background:var(--brass)"></div>
+      <div class="tick-bar" id="tick-running" style="background:var(--running)"></div>
       <div class="count" id="n-running">—</div>
       <div class="label">Running</div>
       <div class="branches">
@@ -286,22 +718,22 @@
       </div>
     </div>
     <div class="node">
-      <div class="tick" style="background:var(--completed)"></div>
+      <div class="tick-bar" style="background:var(--completed)"></div>
       <div class="count" id="n-completed">—</div>
       <div class="label">Completed</div>
     </div>
   </div>
 
   <div class="row">
-    <section class="reveal">
-      <h2>Queue pressure <span class="sub" id="spark-sub">last 2 min</span></h2>
-      <svg id="spark" preserveAspectRatio="none" viewBox="0 0 600 130" role="img" aria-label="Queue depth over time"></svg>
+    <section class="panel rv">
+      <h2>Queue pressure <span class="sub" id="spark-sub">warming up</span></h2>
+      <svg id="spark" preserveAspectRatio="none" viewBox="0 0 600 138" role="img" aria-label="Queue depth over time"></svg>
       <div class="legend">
         <span><i style="background:var(--brass)"></i>queued</span>
         <span><i style="background:var(--queued)"></i>running</span>
       </div>
     </section>
-    <section class="reveal">
+    <section class="panel rv">
       <h2>Workers <span class="sub" id="worker-sub"></span></h2>
       <div id="workers"></div>
       <div id="reservation"></div>
@@ -309,7 +741,7 @@
   </div>
 
   <div class="row">
-    <section class="reveal">
+    <section class="panel rv">
       <h2>Jobs <span class="sub">newest 25</span></h2>
       <table>
         <thead><tr>
@@ -320,47 +752,388 @@
         <tbody id="jobs"><tr><td colspan="8" class="empty">Waiting for the first poll…</td></tr></tbody>
       </table>
     </section>
-    <section class="reveal">
+    <section class="panel rv">
       <h2>Event stream <span class="sub" id="feed-sub"></span></h2>
       <div class="feed" id="feed"></div>
     </section>
   </div>
+</section>
+
+<footer class="wrap">
+  <span>CHRONOS · C++20 distributed task scheduling engine</span>
+  <span class="mono">MIT · zero dependencies · <a href="/metrics" style="color:var(--brass)">/metrics</a></span>
+</footer>
+
 </main>
 
 <script>
 "use strict";
-const STATE_COLOR = {
-  QUEUED: "var(--queued)", DISPATCHED: "var(--dispatched)",
-  RUNNING: "var(--brass)", COMPLETED: "var(--completed)",
-  FAILED: "var(--failed)", RETRY_WAIT: "var(--retry)",
-  CANCELLED: "var(--cancelled)", SUBMITTED: "var(--muted)",
-};
+
+/* ========================================================================
+   0. helpers
+   ======================================================================== */
 const $ = (id) => document.getElementById(id);
-let serverNow = 0;              // monotonic ms, from /api/state
-const depthHistory = [];        // {queued, running}, one per state poll
+const NS = "http://www.w3.org/2000/svg";
+const MOTION = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const STATE_COLOR = {
+  SUBMITTED: "var(--submitted)", QUEUED: "var(--queued)",
+  DISPATCHED: "var(--dispatched)", RUNNING: "var(--running)",
+  RETRY_WAIT: "var(--retry)", COMPLETED: "var(--completed)",
+  FAILED: "var(--failed)", CANCELLED: "var(--cancelled)",
+};
+
+let serverNow = 0;          // ms, from /api/state
+let lastPollAt = performance.now();
+const depth = [];           // queue-depth history for the sparkline
 const seenEvents = new Set();
 
 function fmtAge(ms) {
   if (!isFinite(ms) || ms < 0) return "—";
   const s = ms / 1000;
   if (s < 60) return s.toFixed(0) + "s";
-  if (s < 3600) return (s / 60).toFixed(0) + "m " + Math.floor(s % 60) + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + Math.floor(s % 60) + "s";
   return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
 }
 function fmtClock(ms) {
-  const t = Math.floor(ms / 1000);
-  const p = (n) => String(n).padStart(2, "0");
+  const t = Math.floor(ms / 1000), p = (n) => String(n).padStart(2, "0");
   return p(Math.floor(t / 3600)) + ":" + p(Math.floor((t % 3600) / 60)) + ":" + p(t % 60);
 }
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(NS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+
+/* ========================================================================
+   1. chronometers — hero watch, header watch, background dials
+   ======================================================================== */
+function buildTicks(group, count, opts) {
+  for (let i = 0; i < count; i++) {
+    const major = i % opts.majorEvery === 0;
+    group.appendChild(svgEl("line", {
+      x1: opts.cx, y1: major ? opts.majorFrom : opts.minorFrom,
+      x2: opts.cx, y2: opts.to,
+      stroke: major ? (opts.majorColor || "currentColor") : (opts.minorColor || "currentColor"),
+      "stroke-width": major ? opts.majorW : opts.minorW,
+      transform: `rotate(${(360 / count) * i} ${opts.cx} ${opts.cy})`,
+    }));
+  }
+}
+
+/* hero watch: 60-minute track + 12 brass indices + rotating bezel */
+buildTicks($("hero-ticks"), 60, {
+  cx: 100, cy: 100, majorEvery: 5,
+  majorFrom: 14, minorFrom: 17, to: 22,
+  majorW: 2.4, minorW: .8,
+  majorColor: "var(--brass)", minorColor: "var(--faint)",
+});
+buildTicks($("hero-bezel"), 24, {
+  cx: 100, cy: 100, majorEvery: 6,
+  majorFrom: 4, minorFrom: 6, to: 9,
+  majorW: 1.8, minorW: .7,
+  majorColor: "var(--brass-dim)", minorColor: "var(--line-2)",
+});
+buildTicks($("mini-ticks"), 12, {
+  cx: 50, cy: 50, majorEvery: 3, majorFrom: 9, minorFrom: 12, to: 16,
+  majorW: 2.2, minorW: 1.4,
+});
+buildTicks($("scrub-ticks"), 12, {
+  cx: 50, cy: 50, majorEvery: 3, majorFrom: 8, minorFrom: 11, to: 14,
+  majorW: 1.6, minorW: 1,
+});
+
+/* big faint background dials */
+function buildBackdrop(svg, dense) {
+  const ring = (r, w, dash) => svg.appendChild(svgEl("circle", {
+    cx: 100, cy: 100, r, fill: "none", stroke: "currentColor",
+    "stroke-width": w, ...(dash ? { "stroke-dasharray": dash } : {}),
+  }));
+  ring(96, .6); ring(80, .4, "1 5"); ring(56, .5); ring(32, .4, "2 4");
+  for (let i = 0; i < 60; i++) {
+    const major = i % 5 === 0;
+    if (!major && !dense) continue;
+    svg.appendChild(svgEl("line", {
+      x1: 100, y1: major ? 7 : 10, x2: 100, y2: 14,
+      stroke: "currentColor", "stroke-width": major ? 1.5 : .5,
+      transform: `rotate(${i * 6} 100 100)`,
+    }));
+  }
+}
+buildBackdrop($("dial-a"), true);
+buildBackdrop($("dial-b"), false);
+
+function setHands(uptimeMs) {
+  const s = uptimeMs / 1000;
+  const secDeg = (s % 60) * 6;
+  const minDeg = ((s / 60) % 60) * 6;
+  const hrDeg = ((s / 3600) % 12) * 30;
+  $("hero-s").style.transform = `rotate(${secDeg}deg)`;
+  $("hero-m").style.transform = `rotate(${minDeg}deg)`;
+  $("hero-h").style.transform = `rotate(${hrDeg}deg)`;
+  $("mini-s").style.transform = `rotate(${secDeg}deg)`;
+  $("mini-m").style.transform = `rotate(${minDeg}deg)`;
+}
+
+/* ========================================================================
+   2. scroll engine — progress ring, scrub dial, parallax dials
+   ======================================================================== */
+let scrollY = window.scrollY;
+let smoothProgress = 0;
+const RING_LEN = 2 * Math.PI * 15;
+
+addEventListener("scroll", () => { scrollY = window.scrollY; }, { passive: true });
+
+function scrollProgress() {
+  const max = document.documentElement.scrollHeight - innerHeight;
+  return max > 0 ? clamp(scrollY / max, 0, 1) : 0;
+}
+
+/* arc path for the scrub dial (0 -> 1 sweeps clockwise from 12 o'clock) */
+function arcPath(p) {
+  if (p <= 0.0005) return "";
+  const a = clamp(p, 0, .9999) * Math.PI * 2 - Math.PI / 2;
+  const r = 41;
+  const x = 50 + r * Math.cos(a), y = 50 + r * Math.sin(a);
+  return `M 50 9 A ${r} ${r} 0 ${p > .5 ? 1 : 0} 1 ${x.toFixed(2)} ${y.toFixed(2)}`;
+}
+
+function frame(t) {
+  // live sweeping second hand: interpolate between polls so it never ticks
+  if (serverNow) setHands(serverNow + (performance.now() - lastPollAt));
+
+  const p = scrollProgress();
+  smoothProgress = MOTION ? lerp(smoothProgress, p, .12) : p;
+
+  $("ring-fill").setAttribute("stroke-dashoffset", RING_LEN * (1 - smoothProgress));
+  $("scrub-hand").style.transform = `rotate(${smoothProgress * 360}deg)`;
+  $("scrub-arc").setAttribute("d", arcPath(smoothProgress));
+  $("scrub-pct").textContent = Math.round(smoothProgress * 100) + "%";
+
+  $("dial-a").style.transform = `rotate(${scrollY * .045 + t * .0008}deg)`;
+  $("dial-b").style.transform = `rotate(${-scrollY * .075 - t * .0012}deg)`;
+
+  $("topbar").classList.toggle("stuck", scrollY > 24);
+  $("scrub").classList.toggle("on", scrollY > innerHeight * .55);
+
+  requestAnimationFrame(frame);
+}
+if (MOTION) {
+  requestAnimationFrame(frame);
+} else {
+  setInterval(() => { if (serverNow) setHands(serverNow); }, 1000);
+  addEventListener("scroll", () => {
+    $("topbar").classList.toggle("stuck", scrollY > 24);
+  }, { passive: true });
+}
+
+/* ========================================================================
+   3. benchmark bars (static, from docs/benchmarks.md)
+   Defined before the reveal observer: the no-IntersectionObserver
+   fallback path calls drawBench() immediately, and a `const` declared
+   later would be in its temporal dead zone.
+   ======================================================================== */
+const BENCH = [
+  { name: "fifo",      p50: 170, p99: 2904,  miss: "0.7%", best: false },
+  { name: "priority",  p50: 58,  p99: 10200, miss: "1.2%", best: false },
+  { name: "edf",       p50: 71,  p99: 5613,  miss: "0.2%", best: false },
+  { name: "composite", p50: 51,  p99: 8918,  miss: "0.2%", best: true  },
+];
+function drawBench() {
+  const host = $("bench");
+  if (!host || host.dataset.done === "1") return;
+  host.dataset.done = "1";
+  const max = Math.max(...BENCH.map((b) => b.p50));
+  for (const b of BENCH) {
+    const row = document.createElement("div");
+    row.className = "bench-row";
+    row.innerHTML =
+      `<span class="bench-name${b.best ? " win" : ""}">${b.name}</span>
+       <span class="bench-bar${b.best ? "" : " alt"}"><i></i></span>
+       <span class="bench-num">${b.p50}ms</span>
+       <span class="bench-num hide-sm">${(b.p99 / 1000).toFixed(1)}s</span>
+       <span class="bench-num">${b.miss}</span>`;
+    host.appendChild(row);
+    const fill = row.querySelector("i");
+    requestAnimationFrame(() => {
+      setTimeout(() => { fill.style.width = (b.p50 / max) * 100 + "%"; }, 60);
+    });
+  }
+}
+
+/* ========================================================================
+   4. reveals + count-up stats
+   ======================================================================== */
+function countUp(el) {
+  const target = Number(el.dataset.to);
+  if (!MOTION || target === 0) { el.textContent = target; return; }
+  const start = performance.now(), dur = 1400;
+  const step = (now) => {
+    const k = clamp((now - start) / dur, 0, 1);
+    const eased = 1 - Math.pow(1 - k, 3);
+    el.textContent = Math.round(target * eased);
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+if ("IntersectionObserver" in window) {
+  let stagger = 0, lastGroupAt = 0;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const now = performance.now();
+      if (now - lastGroupAt > 400) stagger = 0;
+      lastGroupAt = now;
+      e.target.style.transitionDelay = Math.min(stagger++, 5) * 80 + "ms";
+      e.target.classList.add("in");
+      io.unobserve(e.target);
+      if (e.target.id === "bench") drawBench();
+      e.target.querySelectorAll?.(".cu").forEach(countUp);
+    }
+  }, { threshold: .15, rootMargin: "0px 0px -8% 0px" });
+  document.querySelectorAll(".rv, .rv-l").forEach((el) => io.observe(el));
+  // hero stats are above the fold: run them immediately
+  document.querySelectorAll(".stats .cu").forEach(countUp);
+} else {
+  document.querySelectorAll(".rv, .rv-l").forEach((el) => el.classList.add("in"));
+  document.querySelectorAll(".cu").forEach((el) => { el.textContent = el.dataset.to; });
+  drawBench();
+}
+
+/* ========================================================================
+   5. lifecycle diagram — drawn, then a job pulse travels the happy path
+   ======================================================================== */
+const LC_NODES = [
+  { id: "sub",  x: 40,  y: 96,  w: 108, h: 42, label: "SUBMITTED", color: "var(--submitted)" },
+  { id: "que",  x: 196, y: 96,  w: 108, h: 42, label: "QUEUED",    color: "var(--queued)" },
+  { id: "dis",  x: 352, y: 96,  w: 112, h: 42, label: "DISPATCHED",color: "var(--dispatched)" },
+  { id: "run",  x: 512, y: 96,  w: 100, h: 42, label: "RUNNING",   color: "var(--running)" },
+  { id: "done", x: 668, y: 40,  w: 112, h: 42, label: "COMPLETED", color: "var(--completed)" },
+  { id: "rty",  x: 512, y: 186, w: 100, h: 40, label: "RETRY_WAIT",color: "var(--retry)" },
+  { id: "fail", x: 668, y: 150, w: 100, h: 42, label: "FAILED",    color: "var(--failed)" },
+];
+const LC_EDGES = [
+  { from: "sub", to: "que", label: "accept" },
+  { from: "que", to: "dis", label: "dispatch" },
+  { from: "dis", to: "run", label: "started" },
+  { from: "run", to: "done", label: "ok" },
+  { from: "run", to: "rty", label: "error", dash: true },
+  { from: "rty", to: "que", label: "backoff elapsed", dash: true, arc: true },
+  { from: "rty", to: "fail", label: "retries spent", dash: true },
+];
+const lcById = Object.fromEntries(LC_NODES.map((n) => [n.id, n]));
+const anchor = (n) => ({ cx: n.x + n.w / 2, cy: n.y + n.h / 2 });
+
+function edgePath(e) {
+  const a = anchor(lcById[e.from]), b = anchor(lcById[e.to]);
+  const A = lcById[e.from], B = lcById[e.to];
+  if (e.arc) {
+    // retry loop: drop below, run left, come back up into QUEUED
+    return `M ${A.x} ${a.cy} L ${B.x + B.w / 2} ${a.cy} L ${B.x + B.w / 2} ${B.y + B.h}`;
+  }
+  if (Math.abs(a.cy - b.cy) < 4) {
+    return `M ${A.x + A.w} ${a.cy} L ${B.x} ${b.cy}`;
+  }
+  // elbow between rows
+  const midX = (A.x + A.w + B.x) / 2;
+  const startX = b.cx > a.cx ? A.x + A.w : A.x;
+  const sy = b.cy > a.cy ? A.y + A.h : A.y;
+  if (b.cx > a.cx) {
+    return `M ${startX} ${a.cy} L ${midX} ${a.cy} L ${midX} ${b.cy} L ${B.x} ${b.cy}`;
+  }
+  return `M ${a.cx} ${sy} L ${a.cx} ${b.cy} L ${B.x + B.w} ${b.cy}`;
+}
+
+(function buildLifecycle() {
+  const edges = $("lc-edges"), nodes = $("lc-nodes");
+  for (const e of LC_EDGES) {
+    const d = edgePath(e);
+    const path = svgEl("path", { d, class: "edge" + (e.dash ? " dash" : "") });
+    if (e.from === "run" && e.to === "done") path.setAttribute("stroke", "var(--completed)");
+    if (e.to === "fail") path.setAttribute("stroke", "var(--failed)");
+    if (e.to === "rty" || e.from === "rty") path.setAttribute("stroke", "var(--retry)");
+    edges.appendChild(path);
+    if (e.label) {
+      const a = anchor(lcById[e.from]), b = anchor(lcById[e.to]);
+      edges.appendChild(Object.assign(svgEl("text", {
+        class: "edge-label", x: (a.cx + b.cx) / 2, y: (a.cy + b.cy) / 2 - 7,
+        "text-anchor": "middle",
+      }), { textContent: e.label }));
+    }
+  }
+  for (const n of LC_NODES) {
+    nodes.appendChild(svgEl("rect", {
+      class: "node-box", x: n.x, y: n.y, width: n.w, height: n.h, rx: 9,
+    }));
+    nodes.appendChild(svgEl("rect", {
+      x: n.x, y: n.y, width: 3.5, height: n.h, rx: 2, fill: n.color,
+    }));
+    nodes.appendChild(Object.assign(svgEl("text", {
+      class: "node-label", x: n.x + n.w / 2, y: n.y + n.h / 2 + 4, "text-anchor": "middle",
+    }), { textContent: n.label }));
+  }
+})();
+
+/* a pulse travels SUBMITTED -> ... -> COMPLETED, looping */
+if (MOTION) {
+  const happy = ["sub|que", "que|dis", "dis|run", "run|done"];
+  const paths = happy.map((key) => {
+    const [from, to] = key.split("|");
+    const p = svgEl("path", { d: edgePath({ from, to }) });
+    return p;
+  });
+  const pulse = $("lc-pulse");
+  let leg = 0, legStart = 0;
+
+  const travel = (t) => {
+    if (!legStart) legStart = t;
+    const path = paths[leg];
+    const len = path.getTotalLength ? path.getTotalLength() : 0;
+    const dur = 900;
+    const k = clamp((t - legStart) / dur, 0, 1);
+    if (len) {
+      const pt = path.getPointAtLength(len * k);
+      pulse.setAttribute("cx", pt.x);
+      pulse.setAttribute("cy", pt.y);
+      pulse.setAttribute("opacity", (k < .06 || k > .94) ? .25 : .95);
+      pulse.setAttribute("fill", leg === 3 ? "var(--completed)" : "var(--brass)");
+    }
+    if (k >= 1) { leg = (leg + 1) % paths.length; legStart = t + (leg === 0 ? 500 : 90); }
+    requestAnimationFrame(travel);
+  };
+  requestAnimationFrame(travel);
+}
+
+/* ========================================================================
+   6. live data — state, jobs, events
+   ======================================================================== */
 function setConn(ok) { $("conn").classList.toggle("down", !ok); }
 
-/* ---- state + pipeline + workers + sparkline --------------------------- */
+const DIGIT_H = 38;
+function setOdometer(el, value) {
+  const text = String(Math.max(0, Math.round(value)));
+  if (!MOTION) { el.textContent = text; return; }
+  if (el.dataset.odo !== "1" || el.childElementCount !== text.length) {
+    el.dataset.odo = "1";
+    el.classList.add("odo");
+    el.innerHTML = text.split("").map(() =>
+      `<span class="odo-col">${[0,1,2,3,4,5,6,7,8,9].map((d) => `<span>${d}</span>`).join("")}</span>`
+    ).join("");
+  }
+  [...el.children].forEach((col, i) => {
+    col.style.transform = `translateY(${-Number(text[i]) * DIGIT_H}px)`;
+  });
+}
+
 async function pollState() {
   try {
     const s = await (await fetch("/api/state")).json();
     setConn(true);
     serverNow = s.now_ms;
-    lastPollPerf = performance.now();
+    lastPollAt = performance.now();
     $("uptime").textContent = fmtClock(s.now_ms);
 
     const c = s.job_counts;
@@ -372,62 +1145,65 @@ async function pollState() {
     $("n-failed").textContent = c.FAILED;
     $("tick-running").classList.toggle("live", c.RUNNING > 0);
 
-    depthHistory.push({ q: c.QUEUED, r: c.RUNNING });
-    if (depthHistory.length > 120) depthHistory.shift();
-    drawSpark();
+    // hero subdials
+    $("sub-running").textContent = c.RUNNING;
+    $("sub-workers").textContent = s.workers.filter((w) => w.alive).length;
 
+    depth.push({ q: c.QUEUED, r: c.RUNNING });
+    if (depth.length > 120) depth.shift();
+    drawSpark();
     renderWorkers(s.workers, s.reservation);
   } catch { setConn(false); }
 }
 
 function renderWorkers(workers, reservation) {
   workers.sort((a, b) => a.id - b.id);
-  const alive = workers.filter(w => w.alive).length;
+  const alive = workers.filter((w) => w.alive).length;
   $("worker-sub").textContent = alive + "/" + workers.length + " alive";
-  $("workers").innerHTML = workers.map(w => {
+  $("workers").innerHTML = workers.map((w) => {
     const cpuUsed = w.cpu_total - w.cpu_free, memUsed = w.mem_total_mb - w.mem_free_mb;
-    const beat = fmtAge(serverNow - w.last_heartbeat_ms);
     return `<div class="worker">
-      <div class="head"><span>${w.name}${w.alive ? "" : ' <span class="dead">· dead</span>'}</span>
-        <span style="color:var(--faint)">♥ ${beat}</span></div>
+      <div class="head">
+        <span>${w.name}${w.alive ? "" : ' <span class="dead">· dead</span>'}</span>
+        <span style="color:var(--faint)">♥ ${fmtAge(serverNow - w.last_heartbeat_ms)}</span>
+      </div>
       <div class="bar"><i style="width:${w.cpu_total ? 100 * cpuUsed / w.cpu_total : 0}%"></i></div>
-      <div class="caption"><span>cpu ${cpuUsed}/${w.cpu_total}</span>
-        <span>jobs ${w.running_jobs.length}</span></div>
+      <div class="caption"><span>cpu ${cpuUsed}/${w.cpu_total}</span><span>jobs ${w.running_jobs.length}</span></div>
       <div class="bar mem"><i style="width:${w.mem_total_mb ? 100 * memUsed / w.mem_total_mb : 0}%"></i></div>
       <div class="caption"><span>mem ${memUsed}/${w.mem_total_mb} MB</span></div>
     </div>`;
   }).join("");
   $("reservation").innerHTML = reservation
-    ? `<div class="reservation-note">⧖ backfill: worker ${reservation.worker_id} reserved for job ${reservation.job_id}</div>`
+    ? `<div class="reservation-note">⧖ backfill — worker ${reservation.worker_id} reserved for job #${reservation.job_id}</div>`
     : "";
 }
 
 function drawSpark() {
-  const svg = $("spark");
-  const W = 600, H = 130, PAD = 6;
-  const n = depthHistory.length;
+  const svg = $("spark"), W = 600, H = 138, PAD = 8, n = depth.length;
   if (n < 2) return;
-  const max = Math.max(4, ...depthHistory.map(d => Math.max(d.q, d.r)));
+  const max = Math.max(4, ...depth.map((d) => Math.max(d.q, d.r)));
   const x = (i) => PAD + (W - 2 * PAD) * i / (n - 1);
   const y = (v) => H - PAD - (H - 2 * PAD) * v / max;
-  const line = (key) => depthHistory.map((d, i) =>
+  const line = (key) => depth.map((d, i) =>
     (i ? "L" : "M") + x(i).toFixed(1) + " " + y(d[key]).toFixed(1)).join(" ");
-  const qPath = line("q");
+  const q = line("q");
   svg.innerHTML =
-    `<path d="${qPath} L ${x(n - 1).toFixed(1)} ${H - PAD} L ${PAD} ${H - PAD} Z"
-           fill="var(--brass)" opacity="0.09"></path>
-     <path d="${qPath}" fill="none" stroke="var(--brass)" stroke-width="1.8"></path>
-     <path d="${line("r")}" fill="none" stroke="var(--queued)" stroke-width="1.2" opacity=".8"></path>
-     <text x="${W - PAD}" y="${y(max) + 10}" text-anchor="end"
+    `<defs><linearGradient id="qfill" x1="0" y1="0" x2="0" y2="1">
+       <stop offset="0%" stop-color="var(--brass)" stop-opacity=".26"/>
+       <stop offset="100%" stop-color="var(--brass)" stop-opacity="0"/>
+     </linearGradient></defs>
+     <path d="${q} L ${x(n - 1).toFixed(1)} ${H - PAD} L ${PAD} ${H - PAD} Z" fill="url(#qfill)"/>
+     <path d="${q}" fill="none" stroke="var(--brass)" stroke-width="1.9" stroke-linejoin="round"/>
+     <path d="${line("r")}" fill="none" stroke="var(--queued)" stroke-width="1.3" opacity=".85"/>
+     <text x="${W - PAD}" y="${(y(max) + 11).toFixed(1)}" text-anchor="end"
            fill="var(--faint)" font-size="10" font-family="var(--mono)">${max}</text>`;
   $("spark-sub").textContent = "last " + fmtAge(n * 1000);
 }
 
-/* ---- jobs table -------------------------------------------------------- */
 async function pollJobs() {
   try {
     const data = await (await fetch("/api/jobs?limit=25")).json();
-    const rows = data.jobs.map(j => {
+    const rows = data.jobs.map((j) => {
       const color = STATE_COLOR[j.state] || "var(--muted)";
       const live = ["QUEUED", "DISPATCHED", "RUNNING", "RETRY_WAIT", "SUBMITTED"].includes(j.state);
       return `<tr>
@@ -438,26 +1214,27 @@ async function pollJobs() {
         <td class="mono">${j.attempt}/${1 + j.max_retries}</td>
         <td class="mono" style="color:var(--muted)">${j.cpu}c ${j.memory_mb}M</td>
         <td class="mono" style="color:var(--muted)">${fmtAge(serverNow - j.submitted_at_ms)}</td>
-        <td>${live ? `<button class="cancel" data-id="${j.id}" aria-label="Cancel job ${j.id}">×</button>` : ""}</td>
+        <td>${live ? `<button class="x-btn" data-id="${j.id}" aria-label="Cancel job ${j.id}">×</button>` : ""}</td>
       </tr>`;
     });
     $("jobs").innerHTML = rows.join("") ||
       `<tr><td colspan="8" class="empty">No jobs yet — submit one above.</td></tr>`;
-  } catch { /* state poll owns the connection dot */ }
+  } catch { /* the state poll owns the connection indicator */ }
 }
 $("jobs").addEventListener("click", async (e) => {
   const id = e.target.dataset && e.target.dataset.id;
-  if (id) { await fetch("/api/jobs/" + id + "/cancel", { method: "POST" }); pollJobs(); }
+  if (!id) return;
+  await fetch("/api/jobs/" + id + "/cancel", { method: "POST" });
+  pollJobs();
 });
 
-/* ---- event feed --------------------------------------------------------- */
 function describe(e) {
   if (e.type === "JOB_STATE_CHANGED")
     return `job <b>#${e.job_id}</b> ${e.from.toLowerCase()} → <b>${e.to.toLowerCase()}</b>`;
   if (e.type === "JOB_SUBMITTED") return `job <b>#${e.job_id}</b> submitted`;
   if (e.type === "WORKER_REGISTERED") return `worker <b>#${e.worker_id}</b> joined`;
   if (e.type === "WORKER_MARKED_DEAD") return `worker <b>#${e.worker_id}</b> marked dead`;
-  return e.type.toLowerCase().replaceAll("_", " ");
+  return e.type.toLowerCase().split("_").join(" ");
 }
 function eventColor(e) {
   if (e.type === "JOB_STATE_CHANGED") return STATE_COLOR[e.to] || "var(--muted)";
@@ -467,9 +1244,8 @@ function eventColor(e) {
 async function pollEvents() {
   try {
     const data = await (await fetch("/api/events?limit=40")).json();
-    const feed = $("feed");
-    const items = data.events.slice().reverse();   // newest first
-    feed.innerHTML = items.map(e => {
+    const items = data.events.slice().reverse();
+    $("feed").innerHTML = items.map((e) => {
       const key = e.at_ms + "|" + e.type + "|" + (e.job_id || 0) + "|" + (e.to || "");
       const fresh = !seenEvents.has(key);
       seenEvents.add(key);
@@ -484,12 +1260,16 @@ async function pollEvents() {
   } catch { /* ignore */ }
 }
 
-/* ---- submit ------------------------------------------------------------- */
+/* ========================================================================
+   7. submit drawer + card hover glow
+   ======================================================================== */
 $("toggle-drawer").addEventListener("click", () => {
   const open = $("drawer").classList.toggle("open");
   $("toggle-drawer").setAttribute("aria-expanded", String(open));
-  $("toggle-drawer").textContent = open ? "Close" : "Submit job";
+  $("toggle-drawer").textContent = open ? "Close" : "Submit a job";
+  if (open) $("f-name").focus();
 });
+
 $("do-submit").addEventListener("click", async () => {
   const note = $("submit-note");
   const payload = "duration_ms=" + (Number($("f-duration").value) || 0) +
@@ -504,119 +1284,31 @@ $("do-submit").addEventListener("click", async () => {
   };
   if ($("f-deadline").value) body.deadline_ms = Number($("f-deadline").value);
   try {
-    const response = await fetch("/api/jobs", {
+    const res = await fetch("/api/jobs", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const result = await response.json();
-    note.classList.toggle("err", !response.ok);
-    note.textContent = response.ok ? "Submitted as #" + result.id : (result.error || "rejected");
+    const result = await res.json();
+    note.classList.toggle("err", !res.ok);
+    note.textContent = res.ok ? "submitted as #" + result.id : (result.error || "rejected");
     pollJobs(); pollState();
-  } catch { note.classList.add("err"); note.textContent = "connection failed"; }
+  } catch {
+    note.classList.add("err");
+    note.textContent = "connection failed";
+  }
 });
 
-/* ---- horology: chronometer, dials, odometers, reveals ------------------- */
-const MOTION_OK = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-let lastPollPerf = performance.now();   // for smooth sweep between polls
-
-/* Chronograph dial generator: rings + minute track, reused for the two
-   scroll-reactive backdrops. */
-function buildDial(svg, dense) {
-  const NS = "http://www.w3.org/2000/svg";
-  const ring = (r, w, dash) => {
-    const c = document.createElementNS(NS, "circle");
-    c.setAttribute("cx", 100); c.setAttribute("cy", 100); c.setAttribute("r", r);
-    c.setAttribute("fill", "none"); c.setAttribute("stroke", "currentColor");
-    c.setAttribute("stroke-width", w);
-    if (dash) c.setAttribute("stroke-dasharray", dash);
-    svg.appendChild(c);
-  };
-  svg.style.color = "#8A93A6";
-  ring(96, .6); ring(78, .4, "1 5"); ring(52, .5); ring(30, .4, "2 4");
-  for (let i = 0; i < 60; i++) {
-    const major = i % 5 === 0;
-    if (!major && !dense) continue;
-    const t = document.createElementNS(NS, "line");
-    t.setAttribute("x1", 100); t.setAttribute("y1", major ? 8 : 10.5);
-    t.setAttribute("x2", 100); t.setAttribute("y2", 14);
-    t.setAttribute("stroke", "currentColor");
-    t.setAttribute("stroke-width", major ? 1.4 : .5);
-    t.setAttribute("transform", `rotate(${i * 6} 100 100)`);
-    svg.appendChild(t);
-  }
-}
-buildDial($("dial-a"), true);
-buildDial($("dial-b"), false);
-
-/* Header watch: 12 bezel ticks once, then hands driven by uptime. */
-(() => {
-  const NS = "http://www.w3.org/2000/svg";
-  const g = $("watch-ticks");
-  for (let i = 0; i < 12; i++) {
-    const t = document.createElementNS(NS, "line");
-    t.setAttribute("x1", 50); t.setAttribute("y1", 9);
-    t.setAttribute("x2", 50); t.setAttribute("y2", i % 3 === 0 ? 17 : 13);
-    t.setAttribute("transform", `rotate(${i * 30} 50 50)`);
-    g.appendChild(t);
-  }
-})();
-
-function setHands(uptimeMs) {
-  const s = uptimeMs / 1000;
-  $("hand-s").style.transform = `rotate(${(s % 60) * 6}deg)`;
-  $("hand-m").style.transform = `rotate(${((s / 60) % 60) * 6}deg)`;
-}
-
-/* One rAF loop: sweeping second hand + slow ambient/scroll dial rotation. */
-let scrollPos = window.scrollY;
-addEventListener("scroll", () => { scrollPos = window.scrollY; }, { passive: true });
-if (MOTION_OK) {
-  const animate = (t) => {
-    if (serverNow) setHands(serverNow + (performance.now() - lastPollPerf));
-    $("dial-a").style.transform = `rotate(${scrollPos * 0.045 + t * 0.0009}deg)`;
-    $("dial-b").style.transform = `rotate(${-(scrollPos * 0.08) - t * 0.0014}deg)`;
-    requestAnimationFrame(animate);
-  };
-  requestAnimationFrame(animate);
-} else {
-  setInterval(() => { if (serverNow) setHands(serverNow); }, 1000);
-}
-
-/* Odometer: departure-board digits. Rebuilds columns only when the digit
-   count changes; otherwise just slides the strips. */
-const DIGIT_H = 36;
-function setOdometer(el, value) {
-  const text = String(Math.max(0, Math.round(value)));
-  if (!MOTION_OK) { el.textContent = text; return; }
-  if (el.dataset.odo !== "1" || el.childElementCount !== text.length) {
-    el.dataset.odo = "1";
-    el.classList.add("odo");
-    el.innerHTML = text.split("").map(() =>
-      `<span class="odo-col">${[0,1,2,3,4,5,6,7,8,9].map(d => `<span>${d}</span>`).join("")}</span>`
-    ).join("");
-  }
-  [...el.children].forEach((col, i) => {
-    col.style.transform = `translateY(${-Number(text[i]) * DIGIT_H}px)`;
+document.querySelectorAll(".card").forEach((card) => {
+  card.addEventListener("pointermove", (e) => {
+    const r = card.getBoundingClientRect();
+    card.style.setProperty("--mx", (e.clientX - r.left) + "px");
+    card.style.setProperty("--my", (e.clientY - r.top) + "px");
   });
-}
+});
 
-/* Scroll reveals: staggered entrance as panels reach the viewport. */
-if (MOTION_OK && "IntersectionObserver" in window) {
-  let stagger = 0;
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      e.target.style.transitionDelay = (stagger++ % 4) * 70 + "ms";
-      e.target.classList.add("in");
-      io.unobserve(e.target);
-    }
-  }, { threshold: 0.12 });
-  document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
-} else {
-  document.querySelectorAll(".reveal").forEach((el) => el.classList.add("in"));
-}
-
-/* ---- loops -------------------------------------------------------------- */
+/* ========================================================================
+   8. go
+   ======================================================================== */
 pollState(); pollJobs(); pollEvents();
 setInterval(pollState, 1000);
 setInterval(pollJobs, 2000);
