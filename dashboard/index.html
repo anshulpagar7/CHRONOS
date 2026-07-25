@@ -10,23 +10,32 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 /* ==========================================================================
-   CHRONOS console. One file, no build step, no dependencies.
-   Visual thesis: the page is a chronograph. Scroll is time passing.
+   CHRONOS — the page as a watch movement.
+
+   Architecture of this file:
+     · a single rAF loop drives all continuous motion (hands, cursor,
+       gears, particles, pinned-scene scrub) — nothing animates on the
+       scroll event itself, everything is lerped for weight
+     · scroll-driven CSS (animation-timeline) handles the progress bar
+       where supported; JS falls back
+     · IntersectionObservers gate the canvases: offscreen = zero work
+     · prefers-reduced-motion collapses the page to a calm static layout
    ========================================================================== */
 :root {
-  --void: #06080C;
+  --void: #05070B;
   --canvas: #0A0D13;
   --panel: #10141D;
-  --panel-2: #151A25;
-  --line: #1D2330;
-  --line-2: #2A3242;
-  --text: #E9EDF5;
+  --panel-2: #161B27;
+  --line: #1C2230;
+  --line-2: #2A3345;
+  --text: #ECEFF6;
   --muted: #8A93A6;
   --faint: #4E5768;
 
   --brass: #E8A33D;
-  --brass-hi: #F7CE83;
+  --brass-hi: #F8D28B;
   --brass-dim: #7A5A22;
+  --jewel: #C34A4A;               /* the ruby bearing in a real movement */
 
   --queued: #5B8DEF;
   --dispatched: #7FA6F5;
@@ -40,63 +49,93 @@
   --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --ease: cubic-bezier(.22, 1, .36, 1);
+  --ease-snap: cubic-bezier(.34, 1.3, .35, 1);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html { color-scheme: dark; scroll-behavior: smooth; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-
+html { color-scheme: dark; }
 body {
   background: var(--void);
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
   overflow-x: hidden;
-  /* faint vignette + brass bloom at the top, like glass over a watch face */
-  background-image:
-    radial-gradient(900px 520px at 78% -8%, rgba(232,163,61,.10), transparent 62%),
-    radial-gradient(720px 480px at 8% 4%, rgba(91,141,239,.07), transparent 60%);
-  background-attachment: fixed;
 }
+body.lock { overflow: hidden; }
 a { color: inherit; text-decoration: none; }
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; }
 :focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 6px; }
-::selection { background: rgba(232,163,61,.28); }
-
-/* thin brass scrollbar */
+::selection { background: rgba(232,163,61,.3); }
 ::-webkit-scrollbar { width: 10px; }
 ::-webkit-scrollbar-track { background: var(--void); }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 6px; border: 3px solid var(--void); }
 ::-webkit-scrollbar-thumb:hover { background: var(--brass-dim); }
 
-/* ---------- shared ------------------------------------------------------- */
 .wrap { width: min(1240px, 100% - 44px); margin-inline: auto; }
-.eyebrow {
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: .22em;
-  text-transform: uppercase; color: var(--brass); display: flex;
-  align-items: center; gap: 10px;
-}
-.eyebrow::before {
-  content: ""; width: 26px; height: 1px; background: var(--brass); opacity: .6;
-}
-.section-title {
-  font-size: clamp(26px, 3.6vw, 40px); font-weight: 600; letter-spacing: -.02em;
-  margin: 14px 0 10px; line-height: 1.12;
-}
-.section-lede { color: var(--muted); max-width: 60ch; font-size: 16px; }
-section.band { padding: clamp(72px, 11vw, 130px) 0; position: relative; }
 
-/* ---------- fixed chrome ------------------------------------------------- */
+/* ---------- preloader ----------------------------------------------------- */
+#loader {
+  position: fixed; inset: 0; z-index: 100; background: var(--void);
+  display: grid; place-items: center;
+  transition: transform .8s var(--ease), visibility 0s .8s;
+}
+#loader.done { transform: translateY(-101%); visibility: hidden; }
+#loader .face { width: 92px; height: 92px; position: relative; }
+#loader svg { width: 100%; height: 100%; }
+#loader .word {
+  margin-top: 22px; font-weight: 700; letter-spacing: .34em; font-size: 13px;
+  text-align: center; color: var(--muted);
+}
+#loader .word .k { color: var(--brass); }
+@media (prefers-reduced-motion: no-preference) {
+  #loader .sweep { transform-origin: 50px 50px; animation: sweep .85s var(--ease) forwards; }
+  @keyframes sweep { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+  #loader .word { opacity: 0; animation: fadeup .5s .25s var(--ease) forwards; }
+  @keyframes fadeup { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+}
+@media (prefers-reduced-motion: reduce) { #loader { display: none; } }
+
+/* ---------- custom cursor -------------------------------------------------- */
+#cur-dot, #cur-ring {
+  position: fixed; top: 0; left: 0; z-index: 90; pointer-events: none;
+  border-radius: 50%; opacity: 0; transform: translate(-100px, -100px);
+}
+#cur-dot { width: 6px; height: 6px; background: var(--brass-hi); }
+#cur-ring {
+  width: 34px; height: 34px; border: 1px solid var(--brass);
+  transition: width .25s var(--ease), height .25s var(--ease),
+              border-color .25s, background-color .25s;
+}
+body.has-cursor #cur-dot, body.has-cursor #cur-ring { opacity: 1; }
+body.has-cursor.cur-hover #cur-ring {
+  width: 56px; height: 56px; background: rgba(232,163,61,.07);
+  border-color: var(--brass-hi);
+}
+body.has-cursor, body.has-cursor a, body.has-cursor button,
+body.has-cursor input, body.has-cursor label { cursor: none; }
+
+/* ---------- top progress bar ----------------------------------------------- */
+#pbar {
+  position: fixed; inset: 0 0 auto 0; height: 2px; z-index: 60;
+  background: linear-gradient(90deg, var(--brass-dim), var(--brass), var(--brass-hi));
+  transform-origin: 0 50%; transform: scaleX(0);
+}
+@supports (animation-timeline: scroll()) {
+  #pbar { animation: pgrow linear both; animation-timeline: scroll(root); }
+  @keyframes pgrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+}
+
+/* ---------- header ---------------------------------------------------------- */
 header {
-  position: fixed; inset: 0 0 auto 0; z-index: 40;
+  position: fixed; inset: 2px 0 auto 0; z-index: 50;
   display: flex; align-items: center; gap: 18px;
   padding: 12px max(22px, calc((100vw - 1240px) / 2));
   border-bottom: 1px solid transparent;
-  transition: background .35s var(--ease), border-color .35s var(--ease), backdrop-filter .35s;
+  transition: background .35s var(--ease), border-color .35s;
 }
 header.stuck {
-  background: rgba(6,8,12,.82); backdrop-filter: blur(14px) saturate(1.3);
+  background: rgba(5,7,11,.8); backdrop-filter: blur(16px) saturate(1.4);
   border-bottom-color: var(--line);
 }
 .brand { display: flex; align-items: center; gap: 11px; }
@@ -113,205 +152,291 @@ header .grow { flex: 1; }
 .conn.down { background: var(--failed); }
 @media (prefers-reduced-motion: no-preference) {
   .conn { animation: beat 2.4s ease-in-out infinite; }
-  @keyframes beat { 50% { opacity: .35; transform: scale(.82); } }
+  @keyframes beat { 50% { opacity: .35; transform: scale(.8); } }
 }
 .btn {
-  border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 16px;
+  border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 18px;
   font-size: 13.5px; font-weight: 500; background: var(--panel-2);
-  transition: border-color .2s, background .2s, transform .2s var(--ease);
+  display: inline-block; position: relative;
+  transition: border-color .25s, transform .25s var(--ease), box-shadow .25s;
+  will-change: transform;
 }
-.btn:hover { border-color: var(--faint); transform: translateY(-1px); }
+.btn:hover { border-color: var(--faint); }
 .btn.primary {
-  background: linear-gradient(180deg, var(--brass-hi), var(--brass));
+  background: linear-gradient(180deg, var(--brass-hi), var(--brass) 55%, #C9862A);
   border-color: var(--brass); color: #1A1206; font-weight: 700;
-  box-shadow: 0 6px 22px -10px rgba(232,163,61,.8);
+  box-shadow: 0 8px 28px -10px rgba(232,163,61,.75), inset 0 1px 0 rgba(255,255,255,.35);
 }
-.btn.primary:hover { filter: brightness(1.06); }
 .btn.ghost { background: none; }
 
-/* scroll progress ring in the header */
-#progress-ring { width: 26px; height: 26px; flex: none; }
-#progress-ring circle { fill: none; stroke-width: 2.5; }
-#progress-ring .track { stroke: var(--line-2); }
-#progress-ring .fill {
-  stroke: var(--brass); stroke-linecap: round;
-  transform: rotate(-90deg); transform-origin: 50% 50%;
+/* ---------- shared section furniture --------------------------------------- */
+section.band { padding: clamp(84px, 12vw, 150px) 0; position: relative; }
+.sec-head { display: grid; grid-template-columns: 74px 1fr; gap: 8px 22px; }
+@media (max-width: 640px) { .sec-head { grid-template-columns: 1fr; } }
+.sec-no {
+  font-family: var(--mono); font-size: 12px; color: var(--brass);
+  letter-spacing: .1em; padding-top: 10px;
+}
+.sec-no::after {
+  content: ""; display: block; width: 34px; height: 1px;
+  background: var(--brass-dim); margin-top: 10px;
+}
+.section-title {
+  font-size: clamp(28px, 4vw, 46px); font-weight: 600; letter-spacing: -.025em;
+  line-height: 1.08;
+}
+.section-lede { color: var(--muted); max-width: 62ch; font-size: 16.5px; margin-top: 14px; }
+.section-lede b { color: var(--text); font-weight: 500; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .rv { opacity: 0; transform: translateY(30px); }
+  .rv.in { opacity: 1; transform: none; transition: opacity .9s var(--ease), transform .9s var(--ease); }
 }
 
-/* ---------- scroll chronometer (bottom-right needle dial) ---------------- */
-#scrub {
-  position: fixed; right: 26px; bottom: 26px; z-index: 35;
-  width: 86px; height: 86px; opacity: 0; transform: scale(.75) translateY(12px);
-  transition: opacity .5s var(--ease), transform .5s var(--ease);
-  pointer-events: none;
-}
-#scrub.on { opacity: 1; transform: none; }
-#scrub text { font-family: var(--mono); font-size: 13px; fill: var(--text); }
-#scrub .cap { font-size: 6.4px; fill: var(--faint); letter-spacing: .18em; }
-@media (max-width: 720px) { #scrub { display: none; } }
-
-/* ---------- background dials --------------------------------------------- */
-.dial-bg { position: fixed; pointer-events: none; z-index: 0; color: #7A869C; opacity: .055; will-change: transform; }
-#dial-a { width: 1020px; height: 1020px; top: -300px; right: -330px; }
-#dial-b { width: 560px; height: 560px; bottom: -190px; left: -200px; opacity: .04; }
-header, main, footer { position: relative; z-index: 2; }
-
-/* ---------- hero ---------------------------------------------------------- */
+/* ---------- hero ------------------------------------------------------------ */
 #hero {
-  min-height: 100svh; display: grid; align-items: center;
-  padding: 118px 0 70px;
+  min-height: 100svh; position: relative; display: grid; align-items: center;
+  padding: 130px 0 40px; overflow: hidden;
+  /* guilloché: the engraved dial pattern, in CSS */
+  background:
+    radial-gradient(1100px 640px at 76% -10%, rgba(232,163,61,.12), transparent 60%),
+    radial-gradient(820px 560px at 6% 8%, rgba(91,141,239,.08), transparent 60%),
+    repeating-conic-gradient(from 0deg at 76% 32%,
+      rgba(232,163,61,.028) 0deg .55deg, transparent .55deg 6deg);
 }
-.hero-grid { display: grid; grid-template-columns: 1.08fr .92fr; gap: 54px; align-items: center; }
-@media (max-width: 940px) { .hero-grid { grid-template-columns: 1fr; gap: 40px; } }
+#hero::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 160px;
+  background: linear-gradient(transparent, var(--void)); pointer-events: none;
+}
+#particles { position: absolute; inset: 0; pointer-events: none; }
+
+.hero-grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 54px; align-items: center; position: relative; }
+@media (max-width: 960px) { .hero-grid { grid-template-columns: 1fr; gap: 44px; } }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .24em;
+  text-transform: uppercase; color: var(--brass);
+  display: flex; align-items: center; gap: 12px;
+}
+.eyebrow::before { content: ""; width: 28px; height: 1px; background: var(--brass); opacity: .65; }
 
 .hero-title {
-  font-size: clamp(46px, 8.4vw, 96px); line-height: .94; font-weight: 700;
-  letter-spacing: -.045em; margin: 20px 0 0;
+  font-size: clamp(52px, 9.2vw, 112px); line-height: .92; font-weight: 700;
+  letter-spacing: -.045em; margin: 22px 0 0; display: flex;
 }
-.hero-title .o {
-  color: var(--brass);
-  text-shadow: 0 0 42px rgba(232,163,61,.45);
+.hero-title .lt {
+  display: inline-block; position: relative;
+  transition: transform .3s var(--ease-snap), color .3s;
 }
+.hero-title .lt:hover { transform: translateY(-8px); color: var(--brass-hi); }
+.hero-title .lt.o { color: var(--brass); text-shadow: 0 0 48px rgba(232,163,61,.5); }
+@media (prefers-reduced-motion: no-preference) {
+  body.ready .hero-title .lt {
+    animation: rise .9s var(--ease) both;
+    animation-delay: calc(.06s * var(--i) + .15s);
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(56px) rotate(6deg); }
+    to   { opacity: 1; transform: none; }
+  }
+  body:not(.ready) .hero-title .lt { opacity: 0; }
+}
+
 .hero-sub {
-  margin-top: 22px; font-size: clamp(16px, 1.7vw, 19px); color: var(--muted);
+  margin-top: 26px; font-size: clamp(16px, 1.7vw, 19px); color: var(--muted);
   max-width: 54ch;
 }
 .hero-sub b { color: var(--text); font-weight: 500; }
-.hero-cta { display: flex; gap: 12px; margin-top: 30px; flex-wrap: wrap; }
+.hero-cta { display: flex; gap: 14px; margin-top: 32px; flex-wrap: wrap; }
 
-.stats { display: flex; gap: 34px; margin-top: 42px; flex-wrap: wrap; }
+.stats { display: flex; gap: 38px; margin-top: 46px; flex-wrap: wrap; }
 .stat .v {
-  font-family: var(--mono); font-size: 27px; font-weight: 500;
+  font-family: var(--mono); font-size: 28px; font-weight: 500;
   font-variant-numeric: tabular-nums; letter-spacing: -.01em;
 }
 .stat .v .u { color: var(--brass); }
 .stat .l {
-  font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
-  color: var(--faint); margin-top: 3px;
+  font-size: 10.5px; letter-spacing: .17em; text-transform: uppercase;
+  color: var(--faint); margin-top: 4px;
 }
 
-/* the big hero chronometer */
 .watch-stage { display: grid; place-items: center; position: relative; }
-#watch-hero { width: min(420px, 84vw); height: min(420px, 84vw); }
+#watch-hero { width: min(440px, 86vw); height: min(440px, 86vw); position: relative; z-index: 1; }
 .watch-glow {
-  position: absolute; inset: 12%;
-  background: radial-gradient(circle, rgba(232,163,61,.16), transparent 66%);
-  filter: blur(26px); pointer-events: none;
+  position: absolute; inset: 8%;
+  background: radial-gradient(circle, rgba(232,163,61,.17), transparent 64%);
+  filter: blur(30px); pointer-events: none;
 }
 #watch-hero .hand { transform-origin: 100px 100px; }
-
-.scroll-cue {
-  display: flex; align-items: center; gap: 10px; margin-top: 54px;
-  font-family: var(--mono); font-size: 11px; letter-spacing: .2em;
-  text-transform: uppercase; color: var(--faint);
+@media (prefers-reduced-motion: no-preference) {
+  body.ready #watch-hero { animation: watchin 1.2s var(--ease) both .2s; }
+  @keyframes watchin { from { opacity: 0; transform: scale(.92) rotate(-8deg); } to { opacity: 1; transform: none; } }
 }
-.scroll-cue .rail {
-  width: 1px; height: 42px; background: linear-gradient(var(--brass), transparent);
+
+/* ---------- marquee --------------------------------------------------------- */
+.marquee {
+  border-block: 1px solid var(--line); background: rgba(10,13,19,.6);
+  overflow: hidden; padding: 13px 0; position: relative; z-index: 3;
+}
+.marquee .track {
+  display: flex; gap: 56px; width: max-content; white-space: nowrap;
+  font-family: var(--mono); font-size: 12.5px; letter-spacing: .12em;
+  color: var(--muted); text-transform: uppercase;
+}
+.marquee .track span b { color: var(--brass); font-weight: 500; }
+.marquee .track span i { font-style: normal; color: var(--faint); margin-right: 10px; }
+@media (prefers-reduced-motion: no-preference) {
+  .marquee .track { animation: slide 36s linear infinite; }
+  @keyframes slide { to { transform: translateX(-50%); } }
+  .marquee:hover .track { animation-play-state: paused; }
+}
+
+/* ---------- pinned movement (scrollytelling) -------------------------------- */
+#movement { height: 420vh; position: relative; }
+#movement .stage {
+  position: sticky; top: 0; height: 100svh; overflow: hidden;
+  display: grid; align-items: center;
+  background:
+    radial-gradient(900px 620px at 20% 110%, rgba(232,163,61,.07), transparent 62%);
+}
+#gears { position: absolute; inset: 0; pointer-events: none; opacity: .8; }
+.mv-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 40px;
+  align-items: center; position: relative; z-index: 2;
+}
+@media (max-width: 900px) { .mv-grid { grid-template-columns: 1fr; align-content: center; gap: 26px; } }
+
+.mv-copy .stage-panels { position: relative; margin-top: 20px; min-height: 190px; }
+.stage-panel {
+  position: absolute; inset: 0; opacity: 0; transform: translateY(18px);
+  transition: opacity .45s var(--ease), transform .45s var(--ease);
+  pointer-events: none;
+}
+.stage-panel.on { opacity: 1; transform: none; pointer-events: auto; }
+.stage-panel h3 {
+  font-family: var(--mono); font-size: 20px; font-weight: 500; letter-spacing: .02em;
+  display: flex; align-items: center; gap: 12px;
+}
+.stage-panel h3 i {
+  width: 11px; height: 11px; border-radius: 50%; display: inline-block; flex: none;
+}
+.stage-panel p { color: var(--muted); margin-top: 12px; max-width: 46ch; font-size: 15.5px; }
+.stage-panel code {
+  font-family: var(--mono); font-size: 12.5px; color: var(--brass);
+  background: rgba(232,163,61,.08); padding: 1px 6px; border-radius: 4px;
+}
+.mv-progress { display: flex; gap: 7px; margin-top: 26px; }
+.mv-progress i {
+  height: 3px; flex: 1; background: var(--line-2); border-radius: 2px;
   position: relative; overflow: hidden;
 }
-@media (prefers-reduced-motion: no-preference) {
-  .scroll-cue .rail::after {
-    content: ""; position: absolute; inset-inline: 0; height: 12px;
-    background: var(--brass-hi); animation: drop 2.1s var(--ease) infinite;
-  }
-  @keyframes drop { 0% { top: -14px; opacity: 0; } 30% { opacity: 1; } 100% { top: 44px; opacity: 0; } }
+.mv-progress i::after {
+  content: ""; position: absolute; inset: 0; background: var(--brass);
+  transform: scaleX(var(--f, 0)); transform-origin: 0 50%;
+}
+.mv-hint {
+  margin-top: 18px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--faint);
 }
 
-/* ---------- reveals ------------------------------------------------------- */
-@media (prefers-reduced-motion: no-preference) {
-  .rv { opacity: 0; transform: translateY(26px); }
-  .rv.in {
-    opacity: 1; transform: none;
-    transition: opacity .85s var(--ease), transform .85s var(--ease);
-  }
-  .rv-l { opacity: 0; transform: translateX(-22px); }
-  .rv-l.in { opacity: 1; transform: none; transition: opacity .8s var(--ease), transform .8s var(--ease); }
-}
+.mv-scene { position: relative; height: min(64svh, 560px); }
+#track-svg { width: 100%; height: 100%; overflow: visible; }
+#track-svg .rail { fill: none; stroke: var(--line-2); stroke-width: 1.6; }
+#track-svg .rail-lit { fill: none; stroke: var(--brass); stroke-width: 2; }
+#track-svg .retry-rail { fill: none; stroke: var(--retry); stroke-width: 1.3; stroke-dasharray: 5 5; opacity: .45; }
+#track-svg .stn { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1.4; }
+#track-svg .stn.lit { stroke-width: 2; }
+#track-svg .stn-label { font-family: var(--mono); font-size: 10px; fill: var(--faint); letter-spacing: .1em; }
+#track-svg .stn-label.lit { fill: var(--text); }
+#capsule { filter: drop-shadow(0 0 10px rgba(232,163,61,.65)); }
 
-/* ---------- feature cards ------------------------------------------------- */
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 46px; }
+/* ---------- features -------------------------------------------------------- */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 52px; perspective: 1200px; }
 @media (max-width: 980px) { .cards { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 620px) { .cards { grid-template-columns: 1fr; } }
 .card {
-  border: 1px solid var(--line); border-radius: 14px; padding: 22px 20px 20px;
-  background: linear-gradient(168deg, var(--panel) 0%, rgba(10,13,19,.7) 100%);
-  position: relative; overflow: hidden;
-  transition: border-color .3s, transform .35s var(--ease), box-shadow .35s var(--ease);
+  border: 1px solid var(--line); border-radius: 16px; padding: 24px 22px 22px;
+  background: linear-gradient(166deg, var(--panel) 0%, rgba(9,12,18,.72) 100%);
+  position: relative; overflow: hidden; transform-style: preserve-3d;
+  transition: border-color .3s, transform .2s ease-out, box-shadow .35s var(--ease);
+  will-change: transform;
+}
+.card::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(248,210,139,.35), transparent);
 }
 .card::after {
-  content: ""; position: absolute; inset: 0; border-radius: 14px; pointer-events: none;
-  background: radial-gradient(320px 160px at var(--mx, 50%) var(--my, 0%), rgba(232,163,61,.10), transparent 70%);
+  content: ""; position: absolute; inset: -1px; border-radius: 16px; pointer-events: none;
+  background: radial-gradient(340px 190px at var(--mx, 50%) var(--my, 0%), rgba(232,163,61,.12), transparent 70%);
   opacity: 0; transition: opacity .35s;
 }
-.card:hover { border-color: var(--line-2); transform: translateY(-4px); box-shadow: 0 22px 44px -30px rgba(0,0,0,.9); }
+.card:hover { border-color: var(--line-2); box-shadow: 0 30px 60px -34px rgba(0,0,0,.95); }
 .card:hover::after { opacity: 1; }
-.card .ic { width: 30px; height: 30px; color: var(--brass); margin-bottom: 15px; }
-.card h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: 7px; }
+.card .ic { width: 30px; height: 30px; color: var(--brass); margin-bottom: 16px; }
+.card h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: 8px; }
 .card p { color: var(--muted); font-size: 14px; }
 .card code {
   font-family: var(--mono); font-size: 12.5px; color: var(--brass);
   background: rgba(232,163,61,.08); padding: 1px 5px; border-radius: 4px;
 }
 
-/* ---------- lifecycle diagram --------------------------------------------- */
-.diagram-shell {
-  margin-top: 44px; border: 1px solid var(--line); border-radius: 16px;
-  background: linear-gradient(180deg, var(--panel), var(--canvas));
-  padding: 26px 20px 20px; overflow-x: auto;
+/* ---------- proof (kinetic rows + bench) ------------------------------------ */
+.kinetic { margin-top: 54px; overflow: hidden; }
+.k-row {
+  font-weight: 700; letter-spacing: -.04em; line-height: 1.04;
+  font-size: clamp(40px, 7vw, 84px); white-space: nowrap;
+  color: var(--panel-2);
+  -webkit-text-stroke: 1px var(--line-2);
+  will-change: transform;
 }
-#lifecycle-svg { width: 100%; min-width: 660px; height: 260px; display: block; }
-#lifecycle-svg .edge { fill: none; stroke: var(--line-2); stroke-width: 1.6; }
-#lifecycle-svg .edge.dash { stroke-dasharray: 5 5; }
-#lifecycle-svg .node-box { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1.4; }
-#lifecycle-svg .node-label { font-family: var(--mono); font-size: 11.5px; fill: var(--text); }
-#lifecycle-svg .edge-label { font-family: var(--mono); font-size: 9.5px; fill: var(--faint); }
-.diagram-legend {
-  display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px;
-  font-family: var(--mono); font-size: 11.5px; color: var(--faint);
-}
-.diagram-legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.k-row b { color: var(--text); -webkit-text-stroke: 0; font-variant-numeric: tabular-nums; }
+.k-row .au { color: var(--brass); -webkit-text-stroke: 0; }
 
-/* ---------- benchmark bars ------------------------------------------------ */
-.bench { margin-top: 42px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.bench { margin-top: 56px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
 .bench-head, .bench-row {
-  display: grid; grid-template-columns: 118px 1fr 84px 84px 74px;
-  gap: 14px; align-items: center; padding: 13px 20px;
+  display: grid; grid-template-columns: 122px 1fr 84px 84px 74px;
+  gap: 14px; align-items: center; padding: 14px 22px;
 }
 @media (max-width: 780px) {
-  .bench-head, .bench-row { grid-template-columns: 92px 1fr 68px; }
+  .bench-head, .bench-row { grid-template-columns: 96px 1fr 68px; }
   .bench-head span:nth-child(4), .bench-row .hide-sm { display: none; }
 }
 .bench-head {
   background: var(--panel-2); border-bottom: 1px solid var(--line);
-  font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint);
+  font-size: 10.5px; letter-spacing: .15em; text-transform: uppercase; color: var(--faint);
 }
-.bench-row { border-bottom: 1px solid var(--line); }
+.bench-row { border-bottom: 1px solid var(--line); transition: background .2s; }
 .bench-row:last-child { border-bottom: 0; }
-.bench-row:hover { background: rgba(255,255,255,.014); }
+.bench-row:hover { background: rgba(255,255,255,.015); }
 .bench-name { font-family: var(--mono); font-size: 13.5px; }
 .bench-name.win { color: var(--brass); }
 .bench-bar { height: 8px; background: var(--panel-2); border-radius: 5px; overflow: hidden; }
 .bench-bar i {
   display: block; height: 100%; width: 0; border-radius: 5px;
   background: linear-gradient(90deg, var(--brass-dim), var(--brass));
-  transition: width 1.25s var(--ease);
+  transition: width 1.3s var(--ease);
 }
 .bench-bar.alt i { background: linear-gradient(90deg, #2C4E86, var(--queued)); }
 .bench-num { font-family: var(--mono); font-size: 12.5px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
-.bench-note { color: var(--faint); font-size: 13px; margin-top: 14px; max-width: 74ch; }
+.bench-note { color: var(--faint); font-size: 13px; margin-top: 16px; max-width: 76ch; }
+.bench-note code { font-family: var(--mono); color: var(--brass); }
 
-/* ---------- console ------------------------------------------------------- */
-#console { padding-top: clamp(60px, 8vw, 96px); }
+/* ---------- live console ----------------------------------------------------- */
+#console { padding-top: clamp(64px, 9vw, 110px); }
 .console-head { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; }
 .console-head .grow { flex: 1; }
 
 .pipeline {
-  display: flex; align-items: stretch; margin-top: 34px;
-  border: 1px solid var(--line); border-radius: 14px;
+  display: flex; align-items: stretch; margin-top: 36px;
+  border: 1px solid var(--line); border-radius: 16px;
   background: linear-gradient(180deg, var(--panel) 0%, var(--canvas) 150%);
-  padding: 24px 16px 20px; overflow-x: auto;
+  padding: 26px 16px 22px; overflow-x: auto; position: relative;
 }
-.node { flex: 1; min-width: 128px; position: relative; padding: 0 16px; }
+.pipeline::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(248,210,139,.3), transparent);
+}
+.node { flex: 1; min-width: 132px; position: relative; padding: 0 16px; }
 .node + .node::before {
   content: ""; position: absolute; left: -14px; top: 27px; width: 28px; height: 1px; background: var(--line-2);
 }
@@ -319,13 +444,13 @@ header, main, footer { position: relative; z-index: 2; }
   content: ""; position: absolute; left: 10px; top: 24px; width: 6px; height: 6px;
   border-top: 1px solid var(--faint); border-right: 1px solid var(--faint); transform: rotate(45deg);
 }
-.node .tick-bar { width: 24px; height: 3px; border-radius: 2px; margin-bottom: 11px; }
+.node .tick-bar { width: 24px; height: 3px; border-radius: 2px; margin-bottom: 12px; }
 .node .count {
-  font-family: var(--mono); font-size: 31px; font-weight: 500;
-  height: 38px; line-height: 38px; font-variant-numeric: tabular-nums;
+  font-family: var(--mono); font-size: 32px; font-weight: 500;
+  height: 40px; line-height: 40px; font-variant-numeric: tabular-nums;
 }
-.node .label { font-size: 10.5px; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
-.branches { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.node .label { font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+.branches { display: flex; gap: 8px; margin-top: 13px; flex-wrap: wrap; }
 .chip {
   font-family: var(--mono); font-size: 11.5px; padding: 3px 9px; border-radius: 6px;
   border: 1px solid var(--line-2); color: var(--muted); background: var(--void);
@@ -334,30 +459,32 @@ header, main, footer { position: relative; z-index: 2; }
   .tick-bar.live { animation: pulse 2.5s ease-in-out infinite; }
   @keyframes pulse { 50% { box-shadow: 0 0 16px 1px rgba(232,163,61,.6); } }
 }
-
-/* odometer digits */
-.odo { display: inline-flex; overflow: hidden; height: 38px; }
+.odo { display: inline-flex; overflow: hidden; height: 40px; }
 .odo-col { display: flex; flex-direction: column; }
-.odo-col span { height: 38px; line-height: 38px; display: block; }
+.odo-col span { height: 40px; line-height: 40px; display: block; }
 @media (prefers-reduced-motion: no-preference) {
-  .odo-col { transition: transform .7s cubic-bezier(.34, 1.2, .32, 1); }
+  .odo-col { transition: transform .7s var(--ease-snap); }
 }
 
 .row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-top: 16px; }
 @media (max-width: 940px) { .row { grid-template-columns: 1fr; } }
 .panel {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 17px 19px;
-  transition: border-color .25s;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px;
+  transition: border-color .25s; position: relative; overflow: hidden;
+}
+.panel::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(248,210,139,.18), transparent);
 }
 .panel:hover { border-color: var(--line-2); }
 .panel h2 {
-  font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
-  font-weight: 500; margin-bottom: 13px; display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 10.5px; letter-spacing: .17em; text-transform: uppercase; color: var(--muted);
+  font-weight: 500; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: baseline;
 }
 .panel h2 .sub { font-family: var(--mono); text-transform: none; letter-spacing: 0; color: var(--faint); font-size: 11.5px; }
 
-#spark { width: 100%; height: 138px; display: block; }
-.legend { display: flex; gap: 18px; margin-top: 9px; font-size: 12px; color: var(--muted); }
+#spark { width: 100%; height: 140px; display: block; }
+.legend { display: flex; gap: 18px; margin-top: 10px; font-size: 12px; color: var(--muted); }
 .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 7px; vertical-align: middle; }
 
 .worker { padding: 11px 0; border-top: 1px solid var(--line); }
@@ -395,14 +522,13 @@ td.mono, th.mono { font-family: var(--mono); font-size: 12.5px; }
   @keyframes settle { from { opacity: 0; transform: translateX(-8px); } }
 }
 
-/* submit drawer */
 #drawer { display: none; margin-top: 16px; }
 #drawer.open { display: block; }
 @media (prefers-reduced-motion: no-preference) {
   #drawer.open { animation: unfold .45s var(--ease); }
   @keyframes unfold { from { opacity: 0; transform: translateY(-10px); } }
 }
-.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(146px, 1fr)); gap: 13px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 13px; }
 label { display: block; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
 input[type=text], input[type=number] {
   width: 100%; background: var(--void); border: 1px solid var(--line-2); border-radius: 8px;
@@ -417,79 +543,76 @@ input:focus { border-color: var(--brass); outline: none; }
 #submit-note.err { color: var(--failed); }
 
 footer {
-  border-top: 1px solid var(--line); margin-top: 90px; padding: 34px 0 46px;
+  border-top: 1px solid var(--line); margin-top: 100px; padding: 36px 0 48px;
   color: var(--faint); font-size: 13px;
   display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap;
 }
 footer .mono { font-family: var(--mono); font-size: 12px; }
+footer a { color: var(--brass); }
 </style>
 </head>
-<body>
+<body class="lock">
 
-<svg id="dial-a" class="dial-bg" viewBox="0 0 200 200" aria-hidden="true"></svg>
-<svg id="dial-b" class="dial-bg" viewBox="0 0 200 200" aria-hidden="true"></svg>
+<div id="loader" aria-hidden="true">
+  <div>
+    <div class="face">
+      <svg viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="45" fill="none" stroke="var(--brass-dim)" stroke-width="2.5"/>
+        <g id="loader-ticks" stroke="var(--faint)" stroke-width="1.6"></g>
+        <line class="sweep" x1="50" y1="55" x2="50" y2="14" stroke="var(--brass)" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="50" cy="50" r="2.6" fill="var(--brass)"/>
+      </svg>
+    </div>
+    <div class="word">CHR<span class="k">O</span>NOS</div>
+  </div>
+</div>
+<noscript><style>#loader{display:none} body.lock{overflow:auto}</style></noscript>
+
+<div id="cur-dot" aria-hidden="true"></div>
+<div id="cur-ring" aria-hidden="true"></div>
+<div id="pbar" aria-hidden="true"></div>
 
 <header id="topbar">
   <div class="brand">
     <svg id="watch-mini" viewBox="0 0 100 100" role="img" aria-label="Live scheduler uptime">
       <circle cx="50" cy="50" r="45" fill="var(--panel-2)" stroke="var(--brass-dim)" stroke-width="3"/>
       <g id="mini-ticks" stroke="var(--faint)" stroke-width="2"></g>
-      <line id="mini-m" class="hand" x1="50" y1="50" x2="50" y2="22" stroke="var(--muted)" stroke-width="3.6" stroke-linecap="round"/>
-      <line id="mini-s" class="hand" x1="50" y1="57" x2="50" y2="15" stroke="var(--brass)" stroke-width="1.8" stroke-linecap="round"/>
+      <line id="mini-m" class="hand" x1="50" y1="50" x2="50" y2="22" stroke="var(--muted)" stroke-width="3.6" stroke-linecap="round" style="transform-origin:50px 50px"/>
+      <line id="mini-s" class="hand" x1="50" y1="57" x2="50" y2="15" stroke="var(--brass)" stroke-width="1.8" stroke-linecap="round" style="transform-origin:50px 50px"/>
       <circle cx="50" cy="50" r="3" fill="var(--brass)"/>
     </svg>
     <span class="wordmark">CHR<span class="k">O</span>NOS</span>
   </div>
   <span class="grow"></span>
   <div class="uptime"><span class="conn" id="conn"></span>uptime&nbsp;<b id="uptime">—</b></div>
-  <svg id="progress-ring" viewBox="0 0 36 36" aria-hidden="true">
-    <circle class="track" cx="18" cy="18" r="15"/>
-    <circle class="fill" id="ring-fill" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="94.2"/>
-  </svg>
-  <a class="btn ghost" href="#console">Console</a>
+  <a class="btn ghost" href="#console" data-cur>Console</a>
 </header>
-
-<!-- scroll-scrubbed needle dial -->
-<svg id="scrub" viewBox="0 0 100 100" aria-hidden="true">
-  <circle cx="50" cy="50" r="45" fill="rgba(16,20,29,.86)" stroke="var(--line-2)" stroke-width="2"/>
-  <circle cx="50" cy="50" r="38" fill="none" stroke="var(--line)" stroke-width=".8" stroke-dasharray="1 4"/>
-  <g id="scrub-ticks" stroke="var(--faint)" stroke-width="1.4"></g>
-  <path id="scrub-arc" fill="none" stroke="var(--brass)" stroke-width="2.6" stroke-linecap="round"
-        d="" opacity=".9"/>
-  <line id="scrub-hand" x1="50" y1="52" x2="50" y2="18" stroke="var(--brass-hi)" stroke-width="2.2"
-        stroke-linecap="round" style="transform-origin:50px 50px"/>
-  <circle cx="50" cy="50" r="2.6" fill="var(--brass-hi)"/>
-  <text id="scrub-pct" x="50" y="72" text-anchor="middle">0%</text>
-  <text class="cap" x="50" y="82" text-anchor="middle">ELAPSED</text>
-</svg>
 
 <main>
 
-<!-- ============================ HERO ============================ -->
-<section id="hero" class="wrap">
-  <div class="hero-grid">
+<!-- ================= HERO ================= -->
+<section id="hero">
+  <canvas id="particles" aria-hidden="true"></canvas>
+  <div class="wrap hero-grid">
     <div>
-      <div class="eyebrow">Distributed task scheduling engine</div>
-      <h1 class="hero-title">CHR<span class="o">O</span>NOS</h1>
+      <div class="eyebrow">Distributed task scheduling · C++20</div>
+      <h1 class="hero-title" id="split-title" aria-label="CHRONOS">CHRONOS</h1>
       <p class="hero-sub">
-        A production-inspired scheduler in <b>modern C++20</b>. Resource-aware dispatch across a
-        worker pool, deadline- and priority-driven policies, crash detection with automatic
-        job rescue, and Slurm-style backfill reservations — all provable with a
-        <b>deterministic simulator</b> that runs the real scheduling core on simulated time.
+        A production-inspired scheduling engine. <b>Resource-aware dispatch</b> across a worker
+        pool, deadline- and priority-driven policies, <b>crash detection with automatic job
+        rescue</b>, and Slurm-style backfill reservations — provable with a deterministic
+        simulator that replays the real scheduler on simulated time.
       </p>
       <div class="hero-cta">
-        <a class="btn primary" href="#console">Open live console</a>
-        <a class="btn" href="#proof">See the benchmarks</a>
+        <a class="btn primary" href="#console" data-cur data-mag>Open live console</a>
+        <a class="btn" href="#movement" data-cur data-mag>How it works</a>
       </div>
-
       <div class="stats">
         <div class="stat"><div class="v"><span class="cu" data-to="155">0</span></div><div class="l">tests passing</div></div>
         <div class="stat"><div class="v"><span class="cu" data-to="49">0</span><span class="u">K</span></div><div class="l">jobs/sec · 1 core</div></div>
-        <div class="stat"><div class="v"><span class="cu" data-to="4">0</span></div><div class="l">scheduling policies</div></div>
+        <div class="stat"><div class="v"><span class="cu" data-to="4">0</span></div><div class="l">policies</div></div>
         <div class="stat"><div class="v"><span class="cu" data-to="0">0</span></div><div class="l">dependencies</div></div>
       </div>
-
-      <div class="scroll-cue"><span class="rail"></span>scroll to begin</div>
     </div>
 
     <div class="watch-stage">
@@ -497,162 +620,175 @@ footer .mono { font-family: var(--mono); font-size: 12px; }
       <svg id="watch-hero" viewBox="0 0 200 200" role="img" aria-label="Live chronometer showing scheduler uptime">
         <defs>
           <radialGradient id="face" cx="38%" cy="30%">
-            <stop offset="0%" stop-color="#1B2231"/>
+            <stop offset="0%" stop-color="#1C2434"/>
             <stop offset="72%" stop-color="#10141D"/>
-            <stop offset="100%" stop-color="#080B11"/>
+            <stop offset="100%" stop-color="#070A10"/>
           </radialGradient>
           <linearGradient id="bezel" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#F7CE83"/>
+            <stop offset="0%" stop-color="#F8D28B"/>
             <stop offset="45%" stop-color="#8A6425"/>
-            <stop offset="100%" stop-color="#5A421A"/>
+            <stop offset="100%" stop-color="#54401C"/>
           </linearGradient>
         </defs>
-        <circle cx="100" cy="100" r="95" fill="none" stroke="url(#bezel)" stroke-width="3"/>
+        <circle cx="100" cy="100" r="95" fill="none" stroke="url(#bezel)" stroke-width="3.2"/>
         <circle cx="100" cy="100" r="88" fill="url(#face)" stroke="var(--line-2)" stroke-width="1"/>
         <g id="hero-bezel"></g>
         <g id="hero-ticks"></g>
-        <!-- subdial: live worker count -->
         <circle cx="100" cy="140" r="20" fill="none" stroke="var(--line-2)" stroke-width=".9"/>
-        <text id="sub-workers" x="100" y="141" text-anchor="middle"
-              font-family="var(--mono)" font-size="11" fill="var(--text)">0</text>
-        <text x="100" y="151" text-anchor="middle" font-family="var(--mono)"
-              font-size="5" fill="var(--faint)" letter-spacing="1.4">WORKERS</text>
-        <!-- subdial: live running count -->
+        <text id="sub-workers" x="100" y="141" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--text)">0</text>
+        <text x="100" y="151" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="5" fill="var(--faint)" letter-spacing="1.4">WORKERS</text>
         <circle cx="100" cy="62" r="20" fill="none" stroke="var(--line-2)" stroke-width=".9"/>
-        <text id="sub-running" x="100" y="63" text-anchor="middle"
-              font-family="var(--mono)" font-size="11" fill="var(--brass)">0</text>
-        <text x="100" y="73" text-anchor="middle" font-family="var(--mono)"
-              font-size="5" fill="var(--faint)" letter-spacing="1.4">RUNNING</text>
-
-        <line id="hero-h" class="hand" x1="100" y1="108" x2="100" y2="58"
-              stroke="var(--text)" stroke-width="4.6" stroke-linecap="round"/>
-        <line id="hero-m" class="hand" x1="100" y1="112" x2="100" y2="34"
-              stroke="var(--muted)" stroke-width="3.2" stroke-linecap="round"/>
-        <line id="hero-s" class="hand" x1="100" y1="118" x2="100" y2="22"
-              stroke="var(--brass)" stroke-width="1.5" stroke-linecap="round"/>
+        <text id="sub-running" x="100" y="63" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--brass)">0</text>
+        <text x="100" y="73" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="5" fill="var(--faint)" letter-spacing="1.4">RUNNING</text>
+        <line id="hero-h" class="hand" x1="100" y1="108" x2="100" y2="58" stroke="var(--text)" stroke-width="4.6" stroke-linecap="round"/>
+        <line id="hero-m" class="hand" x1="100" y1="112" x2="100" y2="34" stroke="var(--muted)" stroke-width="3.2" stroke-linecap="round"/>
+        <line id="hero-s" class="hand" x1="100" y1="118" x2="100" y2="22" stroke="var(--brass)" stroke-width="1.5" stroke-linecap="round"/>
         <circle cx="100" cy="100" r="4.4" fill="var(--brass)"/>
-        <circle cx="100" cy="100" r="1.6" fill="#0B0E14"/>
+        <circle cx="100" cy="100" r="1.6" fill="var(--jewel)"/>
       </svg>
     </div>
   </div>
 </section>
 
-<!-- ============================ WHAT IT IS ============================ -->
+<div class="marquee" aria-hidden="true">
+  <div class="track" id="marquee-track">
+    <span><i>◷</i>~49,000 jobs/s <b>on one core</b></span>
+    <span><i>◍</i>FIFO · PRIORITY · EDF · <b>COMPOSITE</b></span>
+    <span><i>◈</i>155 tests · ASan · UBSan · <b>TSan clean</b></span>
+    <span><i>⟳</i>bit-identical simulation <b>per seed</b></span>
+    <span><i>◇</i>zero dependencies · <b>modern C++20</b></span>
+    <span><i>♥</i>heartbeat leases · <b>automatic job rescue</b></span>
+  </div>
+</div>
+
+<!-- ================= PINNED MOVEMENT ================= -->
+<section id="movement" aria-label="How a job moves through CHRONOS">
+  <div class="stage">
+    <canvas id="gears" aria-hidden="true"></canvas>
+    <div class="wrap mv-grid">
+      <div class="mv-copy">
+        <div class="sec-head">
+          <div class="sec-no">01</div>
+          <div>
+            <h2 class="section-title">The life of a job.</h2>
+          </div>
+        </div>
+        <div class="stage-panels" id="stage-panels">
+          <div class="stage-panel" data-stage="0">
+            <h3><i style="background:var(--submitted)"></i>SUBMITTED</h3>
+            <p>A job arrives with a priority, a resource request, an optional deadline, and a
+               retry budget. The spec is validated at the door — <code>priority ∈ [0,9]</code>,
+               resources non-zero — then handed to the scheduler thread through a command queue.</p>
+          </div>
+          <div class="stage-panel" data-stage="1">
+            <h3><i style="background:var(--queued)"></i>QUEUED</h3>
+            <p>The job enters the <code>ReadySet</code>, an ordered structure scored by the
+               active policy. Scores age in real time so nothing waits forever — and every
+               dispatch that jumps past a job is counted against the starvation threshold.</p>
+          </div>
+          <div class="stage-panel" data-stage="2">
+            <h3><i style="background:var(--dispatched)"></i>DISPATCHED</h3>
+            <p>A bounded skip-scan finds the best job that actually <em>fits</em> a worker's
+               free CPU and memory. If a big job keeps getting jumped, a Slurm-style backfill
+               reservation freezes capacity on the largest capable worker until it can run.</p>
+          </div>
+          <div class="stage-panel" data-stage="3">
+            <h3><i style="background:var(--running)"></i>RUNNING</h3>
+            <p>The worker heartbeats on a lease. Miss the window and it is declared dead — its
+               jobs are <em>rescued</em> back to the queue and re-dispatched elsewhere. A failed
+               attempt enters <code>RETRY_WAIT</code> with capped exponential backoff and jitter.</p>
+          </div>
+          <div class="stage-panel" data-stage="4">
+            <h3><i style="background:var(--completed)"></i>COMPLETED</h3>
+            <p>Terminal, with the full transition history retained. Metrics derive from the
+               event stream — queue latency, turnaround, retries — and render straight to
+               Prometheus. Every millisecond accounted for.</p>
+          </div>
+        </div>
+        <div class="mv-progress" id="mv-progress">
+          <i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="mv-hint">scroll to advance the movement</div>
+      </div>
+
+      <div class="mv-scene">
+        <svg id="track-svg" viewBox="0 0 520 520" aria-hidden="true"></svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= FEATURES ================= -->
 <section class="band wrap" id="what">
-  <div class="rv">
-    <div class="eyebrow">What it is</div>
-    <h2 class="section-title">A scheduler that behaves like the real thing.</h2>
-    <p class="section-lede">
-      Jobs arrive with priorities, deadlines, and CPU/memory requirements. Workers advertise
-      capacity and heartbeat their liveness. The scheduler decides who runs what, when — and
-      keeps deciding correctly when workers die mid-job.
-    </p>
+  <div class="sec-head rv">
+    <div class="sec-no">02</div>
+    <div>
+      <h2 class="section-title">Built like infrastructure,<br>not like a demo.</h2>
+      <p class="section-lede">
+        One scheduler thread owns all state. Everything else — workers, the API, metrics,
+        this page — observes from the outside.
+      </p>
+    </div>
   </div>
 
   <div class="cards">
-    <article class="card rv">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>
-      </svg>
+    <article class="card rv" data-tilt>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/></svg>
       <h3>Single-threaded actor core</h3>
-      <p>One scheduler thread owns all state; everything else reaches it through a command queue.
-         <code>run_once(now)</code> is the entire scheduling iteration — which makes races
-         structurally impossible and the whole engine testable in a loop.</p>
+      <p>All scheduling state lives on one thread behind a command queue.
+         <code>run_once(now)</code> is the entire iteration — races are structurally
+         impossible, and the whole engine runs deterministically in a loop.</p>
     </article>
-
-    <article class="card rv">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <rect x="3" y="4" width="18" height="6" rx="1.6"/><rect x="3" y="14" width="11" height="6" rx="1.6"/>
-      </svg>
+    <article class="card rv" data-tilt>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.6"/><rect x="3" y="14" width="11" height="6" rx="1.6"/></svg>
       <h3>Resource-aware dispatch</h3>
-      <p>Jobs declare CPU and memory; workers publish free capacity. A bounded skip-scan finds
-         the best job that actually <em>fits</em>, instead of head-of-line blocking on one
-         oversized task.</p>
+      <p>Jobs declare CPU and memory; workers publish free capacity. A bounded skip-scan
+         picks the best job that fits instead of head-of-line blocking on one oversized task.</p>
     </article>
-
-    <article class="card rv">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <path d="M12 3l8 4v6c0 4.4-3.4 7-8 8-4.6-1-8-3.6-8-8V7z"/><path d="M9.4 12l1.9 2 3.4-4"/>
-      </svg>
+    <article class="card rv" data-tilt>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3l8 4v6c0 4.4-3.4 7-8 8-4.6-1-8-3.6-8-8V7z"/><path d="M9.4 12l1.9 2 3.4-4"/></svg>
       <h3>Crash detection &amp; rescue</h3>
-      <p>Missed heartbeats past the lease window mark a worker dead. Jobs it was running are
-         rescued back to the queue and re-dispatched elsewhere — proven by a chaos test that
-         kills a live worker mid-job.</p>
+      <p>Heartbeat leases catch dead workers; their in-flight jobs are rescued and
+         re-dispatched. Proven by a chaos test that kills a live worker mid-job — TSan clean.</p>
     </article>
-
-    <article class="card rv">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <path d="M4 18V6M4 8h9l-2-2M4 14h13l-2-2"/><circle cx="19" cy="17" r="2.4"/>
-      </svg>
+    <article class="card rv" data-tilt>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 18V6M4 8h9l-2-2M4 14h13l-2-2"/><circle cx="19" cy="17" r="2.4"/></svg>
       <h3>Backfill reservations</h3>
-      <p>When a large job is repeatedly jumped by smaller ones, the scheduler freezes capacity
-         on the biggest capable worker until it can run — Slurm's answer to starvation, in
-         about a hundred lines.</p>
+      <p>A repeatedly-jumped large job earns frozen capacity on the biggest capable worker —
+         Slurm's answer to starvation, with the skip accounting to trigger it honestly.</p>
     </article>
-
-    <article class="card rv">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <path d="M3 17l5-6 4 3.4L21 6"/><path d="M15 6h6v6"/>
-      </svg>
+    <article class="card rv" data-tilt>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 17l5-6 4 3.4L21 6"/><path d="M15 6h6v6"/></svg>
       <h3>Deterministic simulator</h3>
-      <p>The <em>production</em> scheduler driven on a simulated clock: 10,000 jobs and twelve
-         minutes of simulated time in about seven seconds — bit-identical for a given seed.</p>
+      <p>The <em>production</em> scheduler on a simulated clock: 10,000 jobs, twelve minutes
+         of simulated time, ~7 seconds of wall time — bit-identical for a given seed.</p>
     </article>
-
-    <article class="card rv">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <path d="M8 4H5.5A1.5 1.5 0 004 5.5V9M16 4h2.5A1.5 1.5 0 0120 5.5V9M8 20H5.5A1.5 1.5 0 014 18.5V15M16 20h2.5a1.5 1.5 0 001.5-1.5V15"/>
-        <circle cx="12" cy="12" r="2.6"/>
-      </svg>
+    <article class="card rv" data-tilt>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 4H5.5A1.5 1.5 0 004 5.5V9M16 4h2.5A1.5 1.5 0 0120 5.5V9M8 20H5.5A1.5 1.5 0 014 18.5V15M16 20h2.5a1.5 1.5 0 001.5-1.5V15"/><circle cx="12" cy="12" r="2.6"/></svg>
       <h3>Zero dependencies</h3>
-      <p>Standard library only — including the JSON parser, HTTP server, and this page.
-         Clean builds under Debug, Release, ASan+UBSan, and TSan, all with
-         <code>-Werror</code>.</p>
+      <p>Standard library only — including the JSON parser, the HTTP server, and this page.
+         Four CI presets, <code>-Werror</code>, sanitizers always on.</p>
     </article>
   </div>
 </section>
 
-<!-- ============================ LIFECYCLE ============================ -->
-<section class="band wrap" id="lifecycle">
-  <div class="rv">
-    <div class="eyebrow">The state machine</div>
-    <h2 class="section-title">Every job takes one legal path.</h2>
-    <p class="section-lede">
-      Eight states, enforced transitions, and a full history per job. Illegal moves are rejected
-      at the store — which is how a stale report from a worker presumed dead simply bounces off
-      instead of corrupting state.
-    </p>
-  </div>
-
-  <div class="diagram-shell rv">
-    <svg id="lifecycle-svg" viewBox="0 0 900 260" role="img"
-         aria-label="Job state machine: Submitted to Queued to Dispatched to Running, then Completed, retry, or failed">
-      <g id="lc-edges"></g>
-      <g id="lc-nodes"></g>
-      <circle id="lc-pulse" r="5.5" fill="var(--brass)" opacity="0">
-      </circle>
-    </svg>
-    <div class="diagram-legend">
-      <span><i style="background:var(--queued)"></i>waiting</span>
-      <span><i style="background:var(--running)"></i>executing</span>
-      <span><i style="background:var(--retry)"></i>backoff</span>
-      <span><i style="background:var(--completed)"></i>terminal · success</span>
-      <span><i style="background:var(--failed)"></i>terminal · dead-letter</span>
+<!-- ================= PROOF ================= -->
+<section class="band wrap" id="proof">
+  <div class="sec-head rv">
+    <div class="sec-no">03</div>
+    <div>
+      <h2 class="section-title">Measured, not claimed.</h2>
+      <p class="section-lede">
+        Four policies, one bit-identical workload: 10,000 jobs at ~88% cluster utilization.
+        The engine reproduces scheduling theory — <b>Priority starves its tail, EDF protects
+        deadlines, Composite takes both crowns</b>.
+      </p>
     </div>
   </div>
-</section>
 
-<!-- ============================ PROOF ============================ -->
-<section class="band wrap" id="proof">
-  <div class="rv">
-    <div class="eyebrow">Evidence</div>
-    <h2 class="section-title">Four policies, one identical workload.</h2>
-    <p class="section-lede">
-      10,000 jobs at ~88% cluster utilization, replayed bit-for-bit under each policy. The
-      result reproduces classical scheduling theory on running code: FIFO is fairest but slowest
-      at the median; Priority starves its tail; EDF minimizes deadline misses; Composite takes
-      the best median while matching EDF.
-    </p>
+  <div class="kinetic" aria-hidden="true">
+    <div class="k-row" data-drift="-1">SCHEDULE — DISPATCH — EXECUTE — <b>49,000 jobs/s</b> — SCHEDULE — DISPATCH</div>
+    <div class="k-row" data-drift="1"><span class="au">RESCUE</span> — RETRY — RESERVE — <b>0 jobs lost</b> — RESCUE — RETRY — RESERVE</div>
   </div>
 
   <div class="bench rv" id="bench">
@@ -660,23 +796,26 @@ footer .mono { font-family: var(--mono); font-size: 12px; }
       <span>policy</span><span>median wait (lower is better)</span>
       <span class="bench-num">p50</span><span class="bench-num hide-sm">p99</span><span class="bench-num">miss</span>
     </div>
-    <!-- rows injected -->
   </div>
-  <p class="bench-note">
-    Reproduce with <code style="font-family:var(--mono);color:var(--brass)">./build/release/chronos-sim --compare --jobs=10000</code>
-    — same seed, same numbers, every run.
+  <p class="bench-note rv">
+    Reproduce with <code>./build/release/chronos-sim --compare --jobs=10000</code> — same
+    seed, same numbers, every run. Full methodology in <code>docs/benchmarks.md</code>.
   </p>
 </section>
 
-<!-- ============================ LIVE CONSOLE ============================ -->
+<!-- ================= LIVE CONSOLE ================= -->
 <section class="wrap" id="console">
   <div class="console-head rv">
     <div class="grow">
-      <div class="eyebrow">Live</div>
-      <h2 class="section-title">The engine, right now.</h2>
-      <p class="section-lede">Everything below is polled from the running daemon over its REST API.</p>
+      <div class="sec-head">
+        <div class="sec-no">04</div>
+        <div>
+          <h2 class="section-title">The engine, live.</h2>
+          <p class="section-lede">Everything below is polled from the running daemon over its REST API.</p>
+        </div>
+      </div>
     </div>
-    <button class="btn primary" id="toggle-drawer" aria-expanded="false">Submit a job</button>
+    <button class="btn primary" id="toggle-drawer" aria-expanded="false" data-cur data-mag>Submit a job</button>
   </div>
 
   <section class="panel" id="drawer" aria-label="Submit a job">
@@ -692,7 +831,7 @@ footer .mono { font-family: var(--mono); font-size: 12px; }
       <div class="check"><input type="checkbox" id="f-fail"><label for="f-fail">Fail first attempt</label></div>
     </div>
     <div class="form-actions">
-      <button class="btn primary" id="do-submit">Submit</button>
+      <button class="btn primary" id="do-submit" data-cur>Submit</button>
       <span id="submit-note"></span>
     </div>
   </section>
@@ -727,7 +866,7 @@ footer .mono { font-family: var(--mono); font-size: 12px; }
   <div class="row">
     <section class="panel rv">
       <h2>Queue pressure <span class="sub" id="spark-sub">warming up</span></h2>
-      <svg id="spark" preserveAspectRatio="none" viewBox="0 0 600 138" role="img" aria-label="Queue depth over time"></svg>
+      <svg id="spark" preserveAspectRatio="none" viewBox="0 0 600 140" role="img" aria-label="Queue depth over time"></svg>
       <div class="legend">
         <span><i style="background:var(--brass)"></i>queued</span>
         <span><i style="background:var(--queued)"></i>running</span>
@@ -761,20 +900,20 @@ footer .mono { font-family: var(--mono); font-size: 12px; }
 
 <footer class="wrap">
   <span>CHRONOS · C++20 distributed task scheduling engine</span>
-  <span class="mono">MIT · zero dependencies · <a href="/metrics" style="color:var(--brass)">/metrics</a></span>
+  <span class="mono">MIT · zero dependencies · <a href="/metrics" data-cur>/metrics</a></span>
 </footer>
 
 </main>
 
 <script>
 "use strict";
-
 /* ========================================================================
-   0. helpers
+   0. plumbing
    ======================================================================== */
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
 const MOTION = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const FINE = window.matchMedia("(pointer: fine)").matches;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 
@@ -785,9 +924,9 @@ const STATE_COLOR = {
   FAILED: "var(--failed)", CANCELLED: "var(--cancelled)",
 };
 
-let serverNow = 0;          // ms, from /api/state
+let serverNow = 0;
 let lastPollAt = performance.now();
-const depth = [];           // queue-depth history for the sparkline
+const depth = [];
 const seenEvents = new Set();
 
 function fmtAge(ms) {
@@ -801,75 +940,81 @@ function fmtClock(ms) {
   const t = Math.floor(ms / 1000), p = (n) => String(n).padStart(2, "0");
   return p(Math.floor(t / 3600)) + ":" + p(Math.floor((t % 3600) / 60)) + ":" + p(t % 60);
 }
-function svgEl(tag, attrs) {
+function svgEl(tag, attrs, text) {
   const el = document.createElementNS(NS, tag);
   for (const k in attrs) el.setAttribute(k, attrs[k]);
+  if (text !== undefined) el.textContent = text;
   return el;
+}
+function buildTicks(group, count, o) {
+  if (!group) return;
+  for (let i = 0; i < count; i++) {
+    const major = i % o.majorEvery === 0;
+    group.appendChild(svgEl("line", {
+      x1: o.cx, y1: major ? o.majorFrom : o.minorFrom, x2: o.cx, y2: o.to,
+      stroke: major ? (o.majorColor || "currentColor") : (o.minorColor || "currentColor"),
+      "stroke-width": major ? o.majorW : o.minorW,
+      transform: `rotate(${(360 / count) * i} ${o.cx} ${o.cy})`,
+    }));
+  }
 }
 
 /* ========================================================================
-   1. chronometers — hero watch, header watch, background dials
+   1. preloader + split-letter hero + marquee
    ======================================================================== */
-function buildTicks(group, count, opts) {
-  for (let i = 0; i < count; i++) {
-    const major = i % opts.majorEvery === 0;
-    group.appendChild(svgEl("line", {
-      x1: opts.cx, y1: major ? opts.majorFrom : opts.minorFrom,
-      x2: opts.cx, y2: opts.to,
-      stroke: major ? (opts.majorColor || "currentColor") : (opts.minorColor || "currentColor"),
-      "stroke-width": major ? opts.majorW : opts.minorW,
-      transform: `rotate(${(360 / count) * i} ${opts.cx} ${opts.cy})`,
-    }));
-  }
-}
+buildTicks($("loader-ticks"), 12, { cx: 50, cy: 50, majorEvery: 3, majorFrom: 9, minorFrom: 12, to: 16, majorW: 2, minorW: 1.2 });
 
-/* hero watch: 60-minute track + 12 brass indices + rotating bezel */
+(function splitTitle() {
+  const h1 = $("split-title");
+  const text = h1.textContent;
+  h1.textContent = "";
+  [...text].forEach((ch, i) => {
+    const s = document.createElement("span");
+    s.className = "lt" + (ch === "O" ? " o" : "");
+    s.style.setProperty("--i", i);
+    s.textContent = ch;
+    h1.appendChild(s);
+  });
+})();
+
+window.addEventListener("load", () => {
+  const go = () => {
+    $("loader").classList.add("done");
+    document.body.classList.remove("lock");
+    document.body.classList.add("ready");
+  };
+  MOTION ? setTimeout(go, 850) : go();
+});
+/* Safety: never trap the page behind the loader (slow fonts, odd embeds). */
+setTimeout(() => {
+  if (!document.body.classList.contains("ready")) {
+    $("loader").classList.add("done");
+    document.body.classList.remove("lock");
+    document.body.classList.add("ready");
+  }
+}, 2600);
+
+(function marquee() {
+  const track = $("marquee-track");
+  track.innerHTML += track.innerHTML;   /* duplicate for the seamless loop */
+})();
+
+/* ========================================================================
+   2. chronometers
+   ======================================================================== */
 buildTicks($("hero-ticks"), 60, {
-  cx: 100, cy: 100, majorEvery: 5,
-  majorFrom: 14, minorFrom: 17, to: 22,
-  majorW: 2.4, minorW: .8,
-  majorColor: "var(--brass)", minorColor: "var(--faint)",
+  cx: 100, cy: 100, majorEvery: 5, majorFrom: 14, minorFrom: 17, to: 22,
+  majorW: 2.4, minorW: .8, majorColor: "var(--brass)", minorColor: "var(--faint)",
 });
 buildTicks($("hero-bezel"), 24, {
-  cx: 100, cy: 100, majorEvery: 6,
-  majorFrom: 4, minorFrom: 6, to: 9,
-  majorW: 1.8, minorW: .7,
-  majorColor: "var(--brass-dim)", minorColor: "var(--line-2)",
+  cx: 100, cy: 100, majorEvery: 6, majorFrom: 4, minorFrom: 6, to: 9,
+  majorW: 1.8, minorW: .7, majorColor: "var(--brass-dim)", minorColor: "var(--line-2)",
 });
-buildTicks($("mini-ticks"), 12, {
-  cx: 50, cy: 50, majorEvery: 3, majorFrom: 9, minorFrom: 12, to: 16,
-  majorW: 2.2, minorW: 1.4,
-});
-buildTicks($("scrub-ticks"), 12, {
-  cx: 50, cy: 50, majorEvery: 3, majorFrom: 8, minorFrom: 11, to: 14,
-  majorW: 1.6, minorW: 1,
-});
-
-/* big faint background dials */
-function buildBackdrop(svg, dense) {
-  const ring = (r, w, dash) => svg.appendChild(svgEl("circle", {
-    cx: 100, cy: 100, r, fill: "none", stroke: "currentColor",
-    "stroke-width": w, ...(dash ? { "stroke-dasharray": dash } : {}),
-  }));
-  ring(96, .6); ring(80, .4, "1 5"); ring(56, .5); ring(32, .4, "2 4");
-  for (let i = 0; i < 60; i++) {
-    const major = i % 5 === 0;
-    if (!major && !dense) continue;
-    svg.appendChild(svgEl("line", {
-      x1: 100, y1: major ? 7 : 10, x2: 100, y2: 14,
-      stroke: "currentColor", "stroke-width": major ? 1.5 : .5,
-      transform: `rotate(${i * 6} 100 100)`,
-    }));
-  }
-}
-buildBackdrop($("dial-a"), true);
-buildBackdrop($("dial-b"), false);
+buildTicks($("mini-ticks"), 12, { cx: 50, cy: 50, majorEvery: 3, majorFrom: 9, minorFrom: 12, to: 16, majorW: 2.2, minorW: 1.4 });
 
 function setHands(uptimeMs) {
   const s = uptimeMs / 1000;
-  const secDeg = (s % 60) * 6;
-  const minDeg = ((s / 60) % 60) * 6;
-  const hrDeg = ((s / 3600) % 12) * 30;
+  const secDeg = (s % 60) * 6, minDeg = ((s / 60) % 60) * 6, hrDeg = ((s / 3600) % 12) * 30;
   $("hero-s").style.transform = `rotate(${secDeg}deg)`;
   $("hero-m").style.transform = `rotate(${minDeg}deg)`;
   $("hero-h").style.transform = `rotate(${hrDeg}deg)`;
@@ -878,62 +1023,331 @@ function setHands(uptimeMs) {
 }
 
 /* ========================================================================
-   2. scroll engine — progress ring, scrub dial, parallax dials
+   3. hero particles — drifting brass dust, DPR-aware, gated when offscreen
    ======================================================================== */
-let scrollY = window.scrollY;
-let smoothProgress = 0;
-const RING_LEN = 2 * Math.PI * 15;
+const particles = (() => {
+  const canvas = $("particles");
+  const ctx = canvas.getContext && canvas.getContext("2d");
+  if (!ctx || !MOTION) return { draw() {}, active: false };
+  let W = 0, H = 0, pts = [];
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  function size() {
+    const r = canvas.parentElement.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const n = Math.min(70, Math.floor(W * H / 22000));
+    pts = Array.from({ length: n }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      r: .6 + Math.random() * 1.5,
+      vy: -.08 - Math.random() * .22, vx: (Math.random() - .5) * .1,
+      a: .12 + Math.random() * .3, tw: Math.random() * Math.PI * 2,
+    }));
+  }
+  size();
+  addEventListener("resize", size, { passive: true });
+  return {
+    active: true,
+    draw(t) {
+      ctx.clearRect(0, 0, W, H);
+      for (const p of pts) {
+        p.x += p.vx; p.y += p.vy;
+        if (p.y < -4) { p.y = H + 4; p.x = Math.random() * W; }
+        if (p.x < -4) p.x = W + 4; else if (p.x > W + 4) p.x = -4;
+        const glow = p.a * (0.7 + 0.3 * Math.sin(t * .0016 + p.tw));
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(232, 163, 61, ${glow.toFixed(3)})`;
+        ctx.fill();
+      }
+    },
+  };
+})();
 
-addEventListener("scroll", () => { scrollY = window.scrollY; }, { passive: true });
+/* ========================================================================
+   4. the movement — a meshing gear train, scrubbed by scroll
+   Real kinematics: pitch radius r = m·N/2 with one shared module m, centre
+   distance = r₁+r₂, angular velocity ratio ω₂/ω₁ = −N₁/N₂, and a half-tooth
+   phase offset so the teeth interleave instead of colliding.
+   ======================================================================== */
+const gearTrain = (() => {
+  const canvas = $("gears");
+  const ctx = canvas.getContext && canvas.getContext("2d");
+  if (!ctx) return { draw() {}, ok: false };
+  const M = 9;                                   /* module: px per tooth-pitch */
+  const gears = [
+    { N: 30, x: .16, y: .30 },
+    { N: 16 }, { N: 42 }, { N: 12 },
+  ];
+  gears.forEach((g) => { g.r = (M * g.N) / 2; });
+  const CHAIN_ANGLES = [null, .62, .12, -.75];   /* radians from previous centre */
+  let W = 0, H = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  function layout() {
+    const r = canvas.parentElement.getBoundingClientRect();
+    W = r.width; H = r.height;
+    if (!W || !H) { W = 800; H = 600; }
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    gears[0].cx = W * gears[0].x; gears[0].cy = H * gears[0].y;
+    for (let i = 1; i < gears.length; i++) {
+      const a = CHAIN_ANGLES[i], d = gears[i - 1].r + gears[i].r;
+      gears[i].cx = gears[i - 1].cx + Math.cos(a) * d;
+      gears[i].cy = gears[i - 1].cy + Math.sin(a) * d;
+    }
+  }
+  layout();
+  addEventListener("resize", layout, { passive: true });
 
-function scrollProgress() {
-  const max = document.documentElement.scrollHeight - innerHeight;
-  return max > 0 ? clamp(scrollY / max, 0, 1) : 0;
+  function drawGear(g, angle) {
+    const teeth = g.N, ro = g.r + M * .42, ri = g.r - M * .5;
+    ctx.save();
+    ctx.translate(g.cx, g.cy);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    for (let i = 0; i < teeth; i++) {
+      const a0 = (i / teeth) * Math.PI * 2;
+      const step = (Math.PI * 2) / teeth;
+      const a1 = a0 + step * .18, a2 = a0 + step * .32,
+            a3 = a0 + step * .58, a4 = a0 + step * .72;
+      if (i === 0) ctx.moveTo(Math.cos(a0) * ri, Math.sin(a0) * ri);
+      ctx.arc(0, 0, ri, a0, a1);
+      ctx.lineTo(Math.cos(a2) * ro, Math.sin(a2) * ro);
+      ctx.arc(0, 0, ro, a2, a3);
+      ctx.lineTo(Math.cos(a4) * ri, Math.sin(a4) * ri);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = "rgba(232, 163, 61, .5)";
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, ri * .8, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(232, 163, 61, .22)"; ctx.lineWidth = 1; ctx.stroke();
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * ri * .16, Math.sin(a) * ri * .16);
+      ctx.lineTo(Math.cos(a) * ri * .78, Math.sin(a) * ri * .78);
+      ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(195, 74, 74, .85)";     /* the ruby bearing */
+    ctx.fill();
+    ctx.restore();
+  }
+
+  return {
+    ok: true,
+    draw(baseAngle) {
+      ctx.clearRect(0, 0, W, H);
+      let angle = baseAngle;
+      for (let i = 0; i < gears.length; i++) {
+        if (i > 0) {
+          angle = -angle * (gears[i - 1].N / gears[i].N) + Math.PI / gears[i].N;
+        }
+        drawGear(gears[i], angle);
+      }
+    },
+  };
+})();
+
+/* ---- pinned lifecycle scene -------------------------------------------- */
+const STATIONS = [
+  { x: 70,  y: 452, label: "SUBMITTED",  color: "var(--submitted)" },
+  { x: 132, y: 330, label: "QUEUED",     color: "var(--queued)" },
+  { x: 232, y: 236, label: "DISPATCHED", color: "var(--dispatched)" },
+  { x: 352, y: 158, label: "RUNNING",    color: "var(--running)" },
+  { x: 452, y: 66,  label: "COMPLETED",  color: "var(--completed)" },
+];
+(function buildTrack() {
+  const svg = $("track-svg");
+  const pts = STATIONS.map((s) => `${s.x} ${s.y}`);
+  const d = `M ${pts[0]} C 60 380, 90 360, ${pts[1]} S 190 260, ${pts[2]} S 310 180, ${pts[3]} S 430 100, ${pts[4]}`;
+  svg.appendChild(svgEl("path", { d, class: "rail", id: "rail-base" }));
+  svg.appendChild(svgEl("path", { d, class: "rail-lit", id: "rail-lit" }));
+  svg.appendChild(svgEl("path", {
+    d: `M ${STATIONS[3].x} ${STATIONS[3].y} C 300 300, 220 360, ${STATIONS[1].x} ${STATIONS[1].y}`,
+    class: "retry-rail",
+  }));
+  for (const [i, s] of STATIONS.entries()) {
+    svg.appendChild(svgEl("circle", { cx: s.x, cy: s.y, r: 11, class: "stn", id: "stn-" + i }));
+    svg.appendChild(svgEl("circle", { cx: s.x, cy: s.y, r: 4, fill: s.color, opacity: .9 }));
+    svg.appendChild(svgEl("text", {
+      x: s.x + (i === 4 ? -16 : 18), y: s.y + (i === 4 ? -18 : 4),
+      class: "stn-label", id: "stnl-" + i,
+      "text-anchor": i === 4 ? "end" : "start",
+    }, s.label));
+  }
+  const cap = svgEl("g", { id: "capsule" });
+  cap.appendChild(svgEl("circle", { r: 9, fill: "var(--brass)" }));
+  cap.appendChild(svgEl("circle", { r: 3.4, fill: "#1A1206" }));
+  svg.appendChild(cap);
+})();
+
+const movement = {
+  el: $("movement"),
+  railBase: null, railLit: null, railLen: 0, stage: -1,
+  init() {
+    this.railBase = $("rail-base");
+    this.railLit = $("rail-lit");
+    this.railLen = this.railBase.getTotalLength ? this.railBase.getTotalLength() : 0;
+    if (this.railLit && this.railLen) {
+      this.railLit.style.strokeDasharray = this.railLen;
+      this.railLit.style.strokeDashoffset = this.railLen;
+    }
+  },
+  progress() {                       /* p ∈ [0,1] across the pinned distance */
+    const vh = innerHeight || 800;
+    const total = this.el.offsetHeight - vh;
+    if (total <= 0) return 0;
+    return clamp((scrollY - this.el.offsetTop) / total, 0, 1);
+  },
+  update(p) {
+    const stageF = p * (STATIONS.length - 1);
+    const stage = clamp(Math.round(stageF), 0, STATIONS.length - 1);
+
+    if (this.railLen) {
+      const at = this.railBase.getPointAtLength(this.railLen * (stageF / (STATIONS.length - 1)));
+      $("capsule").setAttribute("transform", `translate(${at.x.toFixed(1)} ${at.y.toFixed(1)})`);
+      this.railLit.style.strokeDashoffset = this.railLen * (1 - stageF / (STATIONS.length - 1));
+    }
+    for (let i = 0; i < STATIONS.length; i++) {
+      const on = stageF >= i - .25;
+      const node = $("stn-" + i), label = $("stnl-" + i);
+      if (node) {
+        node.classList.toggle("lit", on);
+        node.setAttribute("stroke", on ? STATIONS[i].color : "");
+      }
+      if (label) label.classList.toggle("lit", on);
+    }
+    if (stage !== this.stage) {
+      this.stage = stage;
+      document.querySelectorAll(".stage-panel").forEach((el) =>
+        el.classList.toggle("on", Number(el.dataset.stage) === stage));
+    }
+    const dashes = $("mv-progress").children;
+    for (let i = 0; i < dashes.length; i++) {
+      dashes[i].style.setProperty("--f", clamp(stageF - i + 1, 0, 1));
+    }
+  },
+};
+movement.init();
+movement.update(0);
+
+/* ========================================================================
+   5. the master loop — one rAF drives everything
+   ======================================================================== */
+let scrollYv = window.scrollY;
+let lastScrollY = scrollYv, scrollVel = 0;
+addEventListener("scroll", () => { scrollYv = window.scrollY; }, { passive: true });
+
+let heroVisible = true, movementNear = true;
+if ("IntersectionObserver" in window) {
+  new IntersectionObserver((e) => { heroVisible = e[0].isIntersecting; },
+    { threshold: 0 }).observe($("hero"));
+  new IntersectionObserver((e) => { movementNear = e[0].isIntersecting; },
+    { rootMargin: "30% 0px" }).observe($("movement"));
 }
 
-/* arc path for the scrub dial (0 -> 1 sweeps clockwise from 12 o'clock) */
-function arcPath(p) {
-  if (p <= 0.0005) return "";
-  const a = clamp(p, 0, .9999) * Math.PI * 2 - Math.PI / 2;
-  const r = 41;
-  const x = 50 + r * Math.cos(a), y = 50 + r * Math.sin(a);
-  return `M 50 9 A ${r} ${r} 0 ${p > .5 ? 1 : 0} 1 ${x.toFixed(2)} ${y.toFixed(2)}`;
+const cursor = { x: -100, y: -100, rx: -100, ry: -100 };
+if (FINE && MOTION) {
+  document.body.classList.add("has-cursor");
+  addEventListener("pointermove", (e) => { cursor.x = e.clientX; cursor.y = e.clientY; }, { passive: true });
+  document.addEventListener("pointerover", (e) => {
+    document.body.classList.toggle("cur-hover",
+      !!e.target.closest("[data-cur], a, button, .card, input, label"));
+  });
 }
 
-function frame(t) {
-  // live sweeping second hand: interpolate between polls so it never ticks
+const CSS_PBAR = typeof CSS !== "undefined" && CSS.supports && CSS.supports("animation-timeline: scroll()");
+let gearAngle = 0;
+
+function master(t) {
   if (serverNow) setHands(serverNow + (performance.now() - lastPollAt));
 
-  const p = scrollProgress();
-  smoothProgress = MOTION ? lerp(smoothProgress, p, .12) : p;
+  scrollVel = lerp(scrollVel, scrollYv - lastScrollY, .18);
+  lastScrollY = scrollYv;
 
-  $("ring-fill").setAttribute("stroke-dashoffset", RING_LEN * (1 - smoothProgress));
-  $("scrub-hand").style.transform = `rotate(${smoothProgress * 360}deg)`;
-  $("scrub-arc").setAttribute("d", arcPath(smoothProgress));
-  $("scrub-pct").textContent = Math.round(smoothProgress * 100) + "%";
+  if (!CSS_PBAR) {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    $("pbar").style.transform = `scaleX(${max > 0 ? scrollYv / max : 0})`;
+  }
+  $("topbar").classList.toggle("stuck", scrollYv > 24);
 
-  $("dial-a").style.transform = `rotate(${scrollY * .045 + t * .0008}deg)`;
-  $("dial-b").style.transform = `rotate(${-scrollY * .075 - t * .0012}deg)`;
+  if (FINE && MOTION) {
+    cursor.rx = lerp(cursor.rx, cursor.x, .16);
+    cursor.ry = lerp(cursor.ry, cursor.y, .16);
+    $("cur-dot").style.transform = `translate(${cursor.x - 3}px, ${cursor.y - 3}px)`;
+    const ring = $("cur-ring");
+    const half = ring.offsetWidth / 2 || 17;
+    ring.style.transform = `translate(${cursor.rx - half}px, ${cursor.ry - half}px)`;
+  }
 
-  $("topbar").classList.toggle("stuck", scrollY > 24);
-  $("scrub").classList.toggle("on", scrollY > innerHeight * .55);
+  if (heroVisible && particles.active) particles.draw(t);
 
-  requestAnimationFrame(frame);
+  if (movementNear) {
+    const p = movement.progress();
+    movement.update(p);
+    gearAngle = p * 7 + t * .00012 + scrollVel * .002;
+    gearTrain.draw(gearAngle);
+  }
+
+  document.querySelectorAll(".k-row").forEach((row) => {
+    const r = row.getBoundingClientRect();
+    const k = (r.top + r.height / 2 - innerHeight / 2) / innerHeight;
+    row.style.transform = `translateX(${k * 120 * Number(row.dataset.drift)}px)`;
+  });
+
+  requestAnimationFrame(master);
 }
 if (MOTION) {
-  requestAnimationFrame(frame);
+  requestAnimationFrame(master);
 } else {
+  /* calm mode: hands tick once a second; the lifecycle still tracks scroll */
   setInterval(() => { if (serverNow) setHands(serverNow); }, 1000);
   addEventListener("scroll", () => {
-    $("topbar").classList.toggle("stuck", scrollY > 24);
+    $("topbar").classList.toggle("stuck", scrollYv > 24);
+    if (!CSS_PBAR) {
+      const max = document.documentElement.scrollHeight - innerHeight;
+      $("pbar").style.transform = `scaleX(${max > 0 ? scrollYv / max : 0})`;
+    }
+    movement.update(movement.progress());
+    gearTrain.draw(movement.progress() * 7);
   }, { passive: true });
+  gearTrain.draw(0);
+}
+
+/* magnetic buttons */
+if (FINE && MOTION) {
+  document.querySelectorAll("[data-mag]").forEach((el) => {
+    el.addEventListener("pointermove", (e) => {
+      const r = el.getBoundingClientRect();
+      const dx = e.clientX - (r.left + r.width / 2);
+      const dy = e.clientY - (r.top + r.height / 2);
+      el.style.transform = `translate(${dx * .18}px, ${dy * .3}px)`;
+    });
+    el.addEventListener("pointerleave", () => { el.style.transform = ""; });
+  });
+}
+
+/* card tilt toward the cursor */
+if (FINE && MOTION) {
+  document.querySelectorAll("[data-tilt]").forEach((card) => {
+    card.addEventListener("pointermove", (e) => {
+      const r = card.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+      card.style.setProperty("--mx", (px * 100) + "%");
+      card.style.setProperty("--my", (py * 100) + "%");
+      card.style.transform =
+        `rotateX(${(py - .5) * -7}deg) rotateY(${(px - .5) * 8}deg) translateY(-4px)`;
+    });
+    card.addEventListener("pointerleave", () => { card.style.transform = ""; });
+  });
 }
 
 /* ========================================================================
-   3. benchmark bars (static, from docs/benchmarks.md)
-   Defined before the reveal observer: the no-IntersectionObserver
-   fallback path calls drawBench() immediately, and a `const` declared
-   later would be in its temporal dead zone.
+   6. benchmark bars (before the observer: its fallback calls drawBench)
    ======================================================================== */
 const BENCH = [
   { name: "fifo",      p50: 170, p99: 2904,  miss: "0.7%", best: false },
@@ -957,28 +1371,26 @@ function drawBench() {
        <span class="bench-num">${b.miss}</span>`;
     host.appendChild(row);
     const fill = row.querySelector("i");
-    requestAnimationFrame(() => {
-      setTimeout(() => { fill.style.width = (b.p50 / max) * 100 + "%"; }, 60);
-    });
+    requestAnimationFrame(() => setTimeout(() => {
+      fill.style.width = (b.p50 / max) * 100 + "%";
+    }, 80));
   }
 }
 
 /* ========================================================================
-   4. reveals + count-up stats
+   7. reveals + count-ups
    ======================================================================== */
 function countUp(el) {
   const target = Number(el.dataset.to);
   if (!MOTION || target === 0) { el.textContent = target; return; }
-  const start = performance.now(), dur = 1400;
+  const start = performance.now(), dur = 1500;
   const step = (now) => {
     const k = clamp((now - start) / dur, 0, 1);
-    const eased = 1 - Math.pow(1 - k, 3);
-    el.textContent = Math.round(target * eased);
+    el.textContent = Math.round(target * (1 - Math.pow(1 - k, 3)));
     if (k < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
 }
-
 if ("IntersectionObserver" in window) {
   let stagger = 0, lastGroupAt = 0;
   const io = new IntersectionObserver((entries) => {
@@ -987,132 +1399,27 @@ if ("IntersectionObserver" in window) {
       const now = performance.now();
       if (now - lastGroupAt > 400) stagger = 0;
       lastGroupAt = now;
-      e.target.style.transitionDelay = Math.min(stagger++, 5) * 80 + "ms";
+      e.target.style.transitionDelay = Math.min(stagger++, 5) * 85 + "ms";
       e.target.classList.add("in");
       io.unobserve(e.target);
       if (e.target.id === "bench") drawBench();
       e.target.querySelectorAll?.(".cu").forEach(countUp);
     }
   }, { threshold: .15, rootMargin: "0px 0px -8% 0px" });
-  document.querySelectorAll(".rv, .rv-l").forEach((el) => io.observe(el));
-  // hero stats are above the fold: run them immediately
+  document.querySelectorAll(".rv").forEach((el) => io.observe(el));
   document.querySelectorAll(".stats .cu").forEach(countUp);
 } else {
-  document.querySelectorAll(".rv, .rv-l").forEach((el) => el.classList.add("in"));
+  document.querySelectorAll(".rv").forEach((el) => el.classList.add("in"));
   document.querySelectorAll(".cu").forEach((el) => { el.textContent = el.dataset.to; });
   drawBench();
 }
 
 /* ========================================================================
-   5. lifecycle diagram — drawn, then a job pulse travels the happy path
-   ======================================================================== */
-const LC_NODES = [
-  { id: "sub",  x: 40,  y: 96,  w: 108, h: 42, label: "SUBMITTED", color: "var(--submitted)" },
-  { id: "que",  x: 196, y: 96,  w: 108, h: 42, label: "QUEUED",    color: "var(--queued)" },
-  { id: "dis",  x: 352, y: 96,  w: 112, h: 42, label: "DISPATCHED",color: "var(--dispatched)" },
-  { id: "run",  x: 512, y: 96,  w: 100, h: 42, label: "RUNNING",   color: "var(--running)" },
-  { id: "done", x: 668, y: 40,  w: 112, h: 42, label: "COMPLETED", color: "var(--completed)" },
-  { id: "rty",  x: 512, y: 186, w: 100, h: 40, label: "RETRY_WAIT",color: "var(--retry)" },
-  { id: "fail", x: 668, y: 150, w: 100, h: 42, label: "FAILED",    color: "var(--failed)" },
-];
-const LC_EDGES = [
-  { from: "sub", to: "que", label: "accept" },
-  { from: "que", to: "dis", label: "dispatch" },
-  { from: "dis", to: "run", label: "started" },
-  { from: "run", to: "done", label: "ok" },
-  { from: "run", to: "rty", label: "error", dash: true },
-  { from: "rty", to: "que", label: "backoff elapsed", dash: true, arc: true },
-  { from: "rty", to: "fail", label: "retries spent", dash: true },
-];
-const lcById = Object.fromEntries(LC_NODES.map((n) => [n.id, n]));
-const anchor = (n) => ({ cx: n.x + n.w / 2, cy: n.y + n.h / 2 });
-
-function edgePath(e) {
-  const a = anchor(lcById[e.from]), b = anchor(lcById[e.to]);
-  const A = lcById[e.from], B = lcById[e.to];
-  if (e.arc) {
-    // retry loop: drop below, run left, come back up into QUEUED
-    return `M ${A.x} ${a.cy} L ${B.x + B.w / 2} ${a.cy} L ${B.x + B.w / 2} ${B.y + B.h}`;
-  }
-  if (Math.abs(a.cy - b.cy) < 4) {
-    return `M ${A.x + A.w} ${a.cy} L ${B.x} ${b.cy}`;
-  }
-  // elbow between rows
-  const midX = (A.x + A.w + B.x) / 2;
-  const startX = b.cx > a.cx ? A.x + A.w : A.x;
-  const sy = b.cy > a.cy ? A.y + A.h : A.y;
-  if (b.cx > a.cx) {
-    return `M ${startX} ${a.cy} L ${midX} ${a.cy} L ${midX} ${b.cy} L ${B.x} ${b.cy}`;
-  }
-  return `M ${a.cx} ${sy} L ${a.cx} ${b.cy} L ${B.x + B.w} ${b.cy}`;
-}
-
-(function buildLifecycle() {
-  const edges = $("lc-edges"), nodes = $("lc-nodes");
-  for (const e of LC_EDGES) {
-    const d = edgePath(e);
-    const path = svgEl("path", { d, class: "edge" + (e.dash ? " dash" : "") });
-    if (e.from === "run" && e.to === "done") path.setAttribute("stroke", "var(--completed)");
-    if (e.to === "fail") path.setAttribute("stroke", "var(--failed)");
-    if (e.to === "rty" || e.from === "rty") path.setAttribute("stroke", "var(--retry)");
-    edges.appendChild(path);
-    if (e.label) {
-      const a = anchor(lcById[e.from]), b = anchor(lcById[e.to]);
-      edges.appendChild(Object.assign(svgEl("text", {
-        class: "edge-label", x: (a.cx + b.cx) / 2, y: (a.cy + b.cy) / 2 - 7,
-        "text-anchor": "middle",
-      }), { textContent: e.label }));
-    }
-  }
-  for (const n of LC_NODES) {
-    nodes.appendChild(svgEl("rect", {
-      class: "node-box", x: n.x, y: n.y, width: n.w, height: n.h, rx: 9,
-    }));
-    nodes.appendChild(svgEl("rect", {
-      x: n.x, y: n.y, width: 3.5, height: n.h, rx: 2, fill: n.color,
-    }));
-    nodes.appendChild(Object.assign(svgEl("text", {
-      class: "node-label", x: n.x + n.w / 2, y: n.y + n.h / 2 + 4, "text-anchor": "middle",
-    }), { textContent: n.label }));
-  }
-})();
-
-/* a pulse travels SUBMITTED -> ... -> COMPLETED, looping */
-if (MOTION) {
-  const happy = ["sub|que", "que|dis", "dis|run", "run|done"];
-  const paths = happy.map((key) => {
-    const [from, to] = key.split("|");
-    const p = svgEl("path", { d: edgePath({ from, to }) });
-    return p;
-  });
-  const pulse = $("lc-pulse");
-  let leg = 0, legStart = 0;
-
-  const travel = (t) => {
-    if (!legStart) legStart = t;
-    const path = paths[leg];
-    const len = path.getTotalLength ? path.getTotalLength() : 0;
-    const dur = 900;
-    const k = clamp((t - legStart) / dur, 0, 1);
-    if (len) {
-      const pt = path.getPointAtLength(len * k);
-      pulse.setAttribute("cx", pt.x);
-      pulse.setAttribute("cy", pt.y);
-      pulse.setAttribute("opacity", (k < .06 || k > .94) ? .25 : .95);
-      pulse.setAttribute("fill", leg === 3 ? "var(--completed)" : "var(--brass)");
-    }
-    if (k >= 1) { leg = (leg + 1) % paths.length; legStart = t + (leg === 0 ? 500 : 90); }
-    requestAnimationFrame(travel);
-  };
-  requestAnimationFrame(travel);
-}
-
-/* ========================================================================
-   6. live data — state, jobs, events
+   8. live data
    ======================================================================== */
 function setConn(ok) { $("conn").classList.toggle("down", !ok); }
 
-const DIGIT_H = 38;
+const DIGIT_H = 40;
 function setOdometer(el, value) {
   const text = String(Math.max(0, Math.round(value)));
   if (!MOTION) { el.textContent = text; return; }
@@ -1144,8 +1451,6 @@ async function pollState() {
     $("n-retry").textContent = c.RETRY_WAIT;
     $("n-failed").textContent = c.FAILED;
     $("tick-running").classList.toggle("live", c.RUNNING > 0);
-
-    // hero subdials
     $("sub-running").textContent = c.RUNNING;
     $("sub-workers").textContent = s.workers.filter((w) => w.alive).length;
 
@@ -1179,7 +1484,7 @@ function renderWorkers(workers, reservation) {
 }
 
 function drawSpark() {
-  const svg = $("spark"), W = 600, H = 138, PAD = 8, n = depth.length;
+  const svg = $("spark"), W = 600, H = 140, PAD = 8, n = depth.length;
   if (n < 2) return;
   const max = Math.max(4, ...depth.map((d) => Math.max(d.q, d.r)));
   const x = (i) => PAD + (W - 2 * PAD) * i / (n - 1);
@@ -1196,7 +1501,7 @@ function drawSpark() {
      <path d="${q}" fill="none" stroke="var(--brass)" stroke-width="1.9" stroke-linejoin="round"/>
      <path d="${line("r")}" fill="none" stroke="var(--queued)" stroke-width="1.3" opacity=".85"/>
      <text x="${W - PAD}" y="${(y(max) + 11).toFixed(1)}" text-anchor="end"
-           fill="var(--faint)" font-size="10" font-family="var(--mono)">${max}</text>`;
+           fill="var(--faint)" font-size="10" font-family="IBM Plex Mono, monospace">${max}</text>`;
   $("spark-sub").textContent = "last " + fmtAge(n * 1000);
 }
 
@@ -1214,12 +1519,12 @@ async function pollJobs() {
         <td class="mono">${j.attempt}/${1 + j.max_retries}</td>
         <td class="mono" style="color:var(--muted)">${j.cpu}c ${j.memory_mb}M</td>
         <td class="mono" style="color:var(--muted)">${fmtAge(serverNow - j.submitted_at_ms)}</td>
-        <td>${live ? `<button class="x-btn" data-id="${j.id}" aria-label="Cancel job ${j.id}">×</button>` : ""}</td>
+        <td>${live ? `<button class="x-btn" data-id="${j.id}" data-cur aria-label="Cancel job ${j.id}">×</button>` : ""}</td>
       </tr>`;
     });
     $("jobs").innerHTML = rows.join("") ||
       `<tr><td colspan="8" class="empty">No jobs yet — submit one above.</td></tr>`;
-  } catch { /* the state poll owns the connection indicator */ }
+  } catch { /* state poll owns the indicator */ }
 }
 $("jobs").addEventListener("click", async (e) => {
   const id = e.target.dataset && e.target.dataset.id;
@@ -1261,7 +1566,7 @@ async function pollEvents() {
 }
 
 /* ========================================================================
-   7. submit drawer + card hover glow
+   9. submit drawer
    ======================================================================== */
 $("toggle-drawer").addEventListener("click", () => {
   const open = $("drawer").classList.toggle("open");
@@ -1269,7 +1574,6 @@ $("toggle-drawer").addEventListener("click", () => {
   $("toggle-drawer").textContent = open ? "Close" : "Submit a job";
   if (open) $("f-name").focus();
 });
-
 $("do-submit").addEventListener("click", async () => {
   const note = $("submit-note");
   const payload = "duration_ms=" + (Number($("f-duration").value) || 0) +
@@ -1298,17 +1602,11 @@ $("do-submit").addEventListener("click", async () => {
   }
 });
 
-document.querySelectorAll(".card").forEach((card) => {
-  card.addEventListener("pointermove", (e) => {
-    const r = card.getBoundingClientRect();
-    card.style.setProperty("--mx", (e.clientX - r.left) + "px");
-    card.style.setProperty("--my", (e.clientY - r.top) + "px");
-  });
-});
-
 /* ========================================================================
-   8. go
+   10. go
    ======================================================================== */
+console.log("%cCHRONOS%c — every millisecond accounted for.",
+  "color:#E8A33D;font-weight:bold;letter-spacing:.2em", "color:#8A93A6");
 pollState(); pollJobs(); pollEvents();
 setInterval(pollState, 1000);
 setInterval(pollJobs, 2000);
