@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CHRONOS — scheduler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --canvas: #0B0E14;
+    --panel: #11151E;
+    --panel-2: #151B26;
+    --line: #1E2430;
+    --text: #E6EAF2;
+    --muted: #8A93A6;
+    --faint: #545E72;
+    --brass: #E8A33D;        /* the one loud thing: time, activity, running */
+    --brass-dim: #8A6425;
+    --queued: #5B8DEF;
+    --dispatched: #7FA6F5;
+    --completed: #3FB68B;
+    --failed: #E05D5D;
+    --retry: #B583E0;
+    --cancelled: #6B7385;
+    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: dark; }
+  body {
+    background: var(--canvas); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.45;
+    min-height: 100vh;
+  }
+  a { color: inherit; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 4px; }
+
+  /* ---- chronograph backdrop (scroll-reactive) --------------------------- */
+  .dial {
+    position: fixed; pointer-events: none; z-index: 0;
+    opacity: .05; will-change: transform;
+  }
+  #dial-a { width: 880px; height: 880px; top: -260px; right: -300px; }
+  #dial-b { width: 430px; height: 430px; bottom: -140px; left: -140px; opacity: .04; }
+  main, header { position: relative; z-index: 1; }
+
+  /* ---- header ---------------------------------------------------------- */
+  header {
+    display: flex; align-items: center; gap: 20px;
+    padding: 14px 24px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: rgba(11,14,20,.92);
+    backdrop-filter: blur(6px); z-index: 10;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .wordmark { font-weight: 700; letter-spacing: .14em; font-size: 15px; }
+  .wordmark .k { color: var(--brass); }
+  /* the header chronometer */
+  #watch { width: 34px; height: 34px; flex: none; }
+  #watch .hand { transform-origin: 50% 50%; }
+  .uptime {
+    font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .uptime b { color: var(--text); font-weight: 500; }
+  .conn { width: 8px; height: 8px; border-radius: 50%; background: var(--completed); }
+  .conn.down { background: var(--failed); }
+  @media (prefers-reduced-motion: no-preference) {
+    .conn { animation: beat 2.4s ease-in-out infinite; }
+    @keyframes beat { 50% { opacity: .45; } }
+    /* the Running node breathes while work is executing */
+    .pipeline .node .tick.live { animation: glow 2.6s ease-in-out infinite; }
+    @keyframes glow {
+      50% { box-shadow: 0 0 14px 1px rgba(232, 163, 61, .55); }
+    }
+  }
+  header .spacer { flex: 1; }
+  .btn {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 14px; font-size: 13px; font-weight: 500;
+  }
+  .btn:hover { border-color: var(--faint); }
+  .btn.primary { background: var(--brass); border-color: var(--brass); color: #14100A; font-weight: 700; }
+  .btn.primary:hover { filter: brightness(1.08); }
+
+  main { max-width: 1240px; margin: 0 auto; padding: 24px; display: grid; gap: 18px; }
+
+  /* ---- scroll reveal + hover ------------------------------------------- */
+  section, .pipeline { transition: border-color .25s ease, transform .25s ease; }
+  section:hover { border-color: #2A3242; }
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(16px); }
+    .reveal.in {
+      opacity: 1; transform: none;
+      transition: opacity .7s cubic-bezier(.22,1,.36,1),
+                  transform .7s cubic-bezier(.22,1,.36,1),
+                  border-color .25s ease;
+    }
+  }
+
+  /* ---- odometer digits --------------------------------------------------
+     Counts roll like a departure board: each digit is a vertical strip of
+     0-9 translated to the current value. */
+  .odo { display: inline-flex; overflow: hidden; height: 36px; }
+  .odo-col { display: flex; flex-direction: column; }
+  .odo-col span { height: 36px; line-height: 36px; display: block; }
+  @media (prefers-reduced-motion: no-preference) {
+    .odo-col { transition: transform .65s cubic-bezier(.3, 1.1, .3, 1); }
+  }
+
+  /* ---- signature: the live state machine ------------------------------- */
+  .pipeline {
+    display: flex; align-items: stretch; gap: 0;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: linear-gradient(180deg, var(--panel) 0%, var(--canvas) 140%);
+    padding: 22px 18px 18px; overflow-x: auto;
+  }
+  .node { flex: 1; min-width: 118px; position: relative; padding: 0 14px; }
+  .node + .node::before {
+    content: ""; position: absolute; left: -14px; top: 26px;
+    width: 28px; height: 1px; background: var(--line);
+  }
+  .node + .node::after {
+    content: ""; position: absolute; left: 10px; top: 23px;
+    width: 6px; height: 6px; border-top: 1px solid var(--faint);
+    border-right: 1px solid var(--faint); transform: rotate(45deg);
+  }
+  .node .count {
+    font-family: var(--mono); font-size: 30px; font-weight: 500;
+    font-variant-numeric: tabular-nums; line-height: 36px; height: 36px;
+  }
+  .node .label {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin-top: 2px;
+  }
+  .node .tick { width: 22px; height: 3px; border-radius: 2px; margin-bottom: 10px; }
+  .branches { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--mono); font-size: 11.5px; padding: 3px 8px;
+    border-radius: 5px; border: 1px solid var(--line); color: var(--muted);
+    background: var(--canvas);
+  }
+  .chip b { font-weight: 500; }
+
+  /* ---- panels grid ------------------------------------------------------ */
+  .row { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  section h2 {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); font-weight: 500; margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  section h2 .sub { font-family: var(--mono); text-transform: none; letter-spacing: 0; color: var(--faint); font-size: 11.5px; }
+
+  /* sparkline */
+  #spark { width: 100%; height: 130px; display: block; }
+  .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+
+  /* workers */
+  .worker { padding: 10px 0; border-top: 1px solid var(--line); }
+  .worker:first-of-type { border-top: 0; padding-top: 2px; }
+  .worker .head { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12.5px; margin-bottom: 7px; }
+  .worker .head .dead { color: var(--failed); }
+  .bar { height: 5px; background: var(--canvas); border-radius: 3px; overflow: hidden; margin: 5px 0; }
+  .bar i { display: block; height: 100%; border-radius: 3px; background: var(--brass); transition: width .5s ease; }
+  .bar.mem i { background: var(--queued); }
+  .worker .caption { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); }
+  .reservation-note {
+    margin-top: 10px; padding: 8px 10px; border: 1px dashed var(--brass-dim);
+    border-radius: 6px; font-family: var(--mono); font-size: 12px; color: var(--brass);
+  }
+
+  /* jobs table */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+       color: var(--faint); font-weight: 500; padding: 4px 8px 8px; }
+  td { padding: 7px 8px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  td.mono, th.mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid; display: inline-block;
+  }
+  .cancel {
+    background: none; border: 1px solid var(--line); border-radius: 5px;
+    width: 22px; height: 22px; line-height: 1; color: var(--muted); font-size: 12px;
+  }
+  .cancel:hover { border-color: var(--failed); color: var(--failed); }
+  .empty { color: var(--faint); padding: 18px 8px; font-size: 13px; }
+
+  /* event feed */
+  .feed { font-family: var(--mono); font-size: 12px; max-height: 420px; overflow-y: auto; }
+  .evt { display: flex; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); align-items: baseline; }
+  .evt:first-child { border-top: 0; }
+  .evt .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; position: relative; top: 1px; }
+  .evt .when { color: var(--faint); margin-left: auto; flex: none; font-size: 11px; }
+  .evt .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .evt .what b { color: var(--text); font-weight: 500; }
+  @media (prefers-reduced-motion: no-preference) {
+    .evt.fresh { animation: settle .5s ease; }
+    @keyframes settle { from { opacity: 0; transform: translateY(-3px); } }
+  }
+
+  /* submit drawer */
+  #drawer { display: none; }
+  #drawer.open { display: block; }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
+  input[type=text], input[type=number] {
+    width: 100%; background: var(--canvas); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; color: var(--text);
+    font-family: var(--mono); font-size: 13px;
+  }
+  input:focus { border-color: var(--brass); outline: none; }
+  .check { display: flex; align-items: center; gap: 8px; padding-top: 22px; }
+  .check label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
+  .form-actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
+  #submit-note { font-family: var(--mono); font-size: 12px; color: var(--completed); }
+  #submit-note.err { color: var(--failed); }
+</style>
+</head>
+<body>
+
+<svg id="dial-a" class="dial" viewBox="0 0 200 200" aria-hidden="true"></svg>
+<svg id="dial-b" class="dial" viewBox="0 0 200 200" aria-hidden="true"></svg>
+
+<header>
+  <div class="brand">
+    <svg id="watch" viewBox="0 0 100 100" role="img" aria-label="Scheduler uptime chronometer">
+      <circle cx="50" cy="50" r="46" fill="var(--panel-2)" stroke="var(--brass-dim)" stroke-width="3"/>
+      <g id="watch-ticks" stroke="var(--faint)" stroke-width="2"></g>
+      <line id="hand-m" class="hand" x1="50" y1="50" x2="50" y2="20" stroke="var(--muted)" stroke-width="3.5" stroke-linecap="round"/>
+      <line id="hand-s" class="hand" x1="50" y1="56" x2="50" y2="14" stroke="var(--brass)" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="50" cy="50" r="3.2" fill="var(--brass)"/>
+    </svg>
+    <div class="wordmark">CHR<span class="k">O</span>NOS</div>
+  </div>
+  <div class="uptime"><span class="conn" id="conn"></span> uptime <b id="uptime">—</b></div>
+  <div class="spacer"></div>
+  <button class="btn primary" id="toggle-drawer" aria-expanded="false">Submit job</button>
+</header>
+
+<main>
+  <section id="drawer" aria-label="Submit a job">
+    <h2>New job</h2>
+    <div class="form-grid">
+      <div><label for="f-name">Name</label><input type="text" id="f-name" value="encode-video"></div>
+      <div><label for="f-priority">Priority 0–9</label><input type="number" id="f-priority" value="5" min="0" max="9"></div>
+      <div><label for="f-cpu">CPU units</label><input type="number" id="f-cpu" value="2" min="1"></div>
+      <div><label for="f-mem">Memory MB</label><input type="number" id="f-mem" value="128" min="1"></div>
+      <div><label for="f-duration">Duration ms</label><input type="number" id="f-duration" value="800" min="0"></div>
+      <div><label for="f-deadline">Deadline ms (blank = none)</label><input type="number" id="f-deadline" placeholder="none"></div>
+      <div><label for="f-retries">Max retries</label><input type="number" id="f-retries" value="2" min="0"></div>
+      <div class="check"><input type="checkbox" id="f-fail"><label for="f-fail">Fail first attempt</label></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn primary" id="do-submit">Submit</button>
+      <span id="submit-note"></span>
+    </div>
+  </section>
+
+  <!-- signature element: the job state machine, live -->
+  <div class="pipeline reveal" aria-label="Job state machine">
+    <div class="node">
+      <div class="tick" style="background:var(--queued)"></div>
+      <div class="count" id="n-queued">—</div>
+      <div class="label">Queued</div>
+    </div>
+    <div class="node">
+      <div class="tick" style="background:var(--dispatched)"></div>
+      <div class="count" id="n-dispatched">—</div>
+      <div class="label">Dispatched</div>
+    </div>
+    <div class="node">
+      <div class="tick" id="tick-running" style="background:var(--brass)"></div>
+      <div class="count" id="n-running">—</div>
+      <div class="label">Running</div>
+      <div class="branches">
+        <span class="chip" style="color:var(--retry);border-color:var(--retry)">↺ retry <b id="n-retry">0</b></span>
+        <span class="chip" style="color:var(--failed);border-color:var(--failed)">✕ failed <b id="n-failed">0</b></span>
+      </div>
+    </div>
+    <div class="node">
+      <div class="tick" style="background:var(--completed)"></div>
+      <div class="count" id="n-completed">—</div>
+      <div class="label">Completed</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <section class="reveal">
+      <h2>Queue pressure <span class="sub" id="spark-sub">last 2 min</span></h2>
+      <svg id="spark" preserveAspectRatio="none" viewBox="0 0 600 130" role="img" aria-label="Queue depth over time"></svg>
+      <div class="legend">
+        <span><i style="background:var(--brass)"></i>queued</span>
+        <span><i style="background:var(--queued)"></i>running</span>
+      </div>
+    </section>
+    <section class="reveal">
+      <h2>Workers <span class="sub" id="worker-sub"></span></h2>
+      <div id="workers"></div>
+      <div id="reservation"></div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="reveal">
+      <h2>Jobs <span class="sub">newest 25</span></h2>
+      <table>
+        <thead><tr>
+          <th class="mono">id</th><th>name</th><th>state</th>
+          <th class="mono">prio</th><th class="mono">try</th>
+          <th class="mono">cpu/mem</th><th class="mono">age</th><th></th>
+        </tr></thead>
+        <tbody id="jobs"><tr><td colspan="8" class="empty">Waiting for the first poll…</td></tr></tbody>
+      </table>
+    </section>
+    <section class="reveal">
+      <h2>Event stream <span class="sub" id="feed-sub"></span></h2>
+      <div class="feed" id="feed"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const STATE_COLOR = {
+  QUEUED: "var(--queued)", DISPATCHED: "var(--dispatched)",
+  RUNNING: "var(--brass)", COMPLETED: "var(--completed)",
+  FAILED: "var(--failed)", RETRY_WAIT: "var(--retry)",
+  CANCELLED: "var(--cancelled)", SUBMITTED: "var(--muted)",
+};
+const $ = (id) => document.getElementById(id);
+let serverNow = 0;              // monotonic ms, from /api/state
+const depthHistory = [];        // {queued, running}, one per state poll
+const seenEvents = new Set();
+
+function fmtAge(ms) {
+  if (!isFinite(ms) || ms < 0) return "—";
+  const s = ms / 1000;
+  if (s < 60) return s.toFixed(0) + "s";
+  if (s < 3600) return (s / 60).toFixed(0) + "m " + Math.floor(s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+function fmtClock(ms) {
+  const t = Math.floor(ms / 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return p(Math.floor(t / 3600)) + ":" + p(Math.floor((t % 3600) / 60)) + ":" + p(t % 60);
+}
+function setConn(ok) { $("conn").classList.toggle("down", !ok); }
+
+/* ---- state + pipeline + workers + sparkline --------------------------- */
+async function pollState() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    setConn(true);
+    serverNow = s.now_ms;
+    lastPollPerf = performance.now();
+    $("uptime").textContent = fmtClock(s.now_ms);
+
+    const c = s.job_counts;
+    setOdometer($("n-queued"), c.QUEUED);
+    setOdometer($("n-dispatched"), c.DISPATCHED);
+    setOdometer($("n-running"), c.RUNNING);
+    setOdometer($("n-completed"), c.COMPLETED);
+    $("n-retry").textContent = c.RETRY_WAIT;
+    $("n-failed").textContent = c.FAILED;
+    $("tick-running").classList.toggle("live", c.RUNNING > 0);
+
+    depthHistory.push({ q: c.QUEUED, r: c.RUNNING });
+    if (depthHistory.length > 120) depthHistory.shift();
+    drawSpark();
+
+    renderWorkers(s.workers, s.reservation);
+  } catch { setConn(false); }
+}
+
+function renderWorkers(workers, reservation) {
+  workers.sort((a, b) => a.id - b.id);
+  const alive = workers.filter(w => w.alive).length;
+  $("worker-sub").textContent = alive + "/" + workers.length + " alive";
+  $("workers").innerHTML = workers.map(w => {
+    const cpuUsed = w.cpu_total - w.cpu_free, memUsed = w.mem_total_mb - w.mem_free_mb;
+    const beat = fmtAge(serverNow - w.last_heartbeat_ms);
+    return `<div class="worker">
+      <div class="head"><span>${w.name}${w.alive ? "" : ' <span class="dead">· dead</span>'}</span>
+        <span style="color:var(--faint)">♥ ${beat}</span></div>
+      <div class="bar"><i style="width:${w.cpu_total ? 100 * cpuUsed / w.cpu_total : 0}%"></i></div>
+      <div class="caption"><span>cpu ${cpuUsed}/${w.cpu_total}</span>
+        <span>jobs ${w.running_jobs.length}</span></div>
+      <div class="bar mem"><i style="width:${w.mem_total_mb ? 100 * memUsed / w.mem_total_mb : 0}%"></i></div>
+      <div class="caption"><span>mem ${memUsed}/${w.mem_total_mb} MB</span></div>
+    </div>`;
+  }).join("");
+  $("reservation").innerHTML = reservation
+    ? `<div class="reservation-note">⧖ backfill: worker ${reservation.worker_id} reserved for job ${reservation.job_id}</div>`
+    : "";
+}
+
+function drawSpark() {
+  const svg = $("spark");
+  const W = 600, H = 130, PAD = 6;
+  const n = depthHistory.length;
+  if (n < 2) return;
+  const max = Math.max(4, ...depthHistory.map(d => Math.max(d.q, d.r)));
+  const x = (i) => PAD + (W - 2 * PAD) * i / (n - 1);
+  const y = (v) => H - PAD - (H - 2 * PAD) * v / max;
+  const line = (key) => depthHistory.map((d, i) =>
+    (i ? "L" : "M") + x(i).toFixed(1) + " " + y(d[key]).toFixed(1)).join(" ");
+  const qPath = line("q");
+  svg.innerHTML =
+    `<path d="${qPath} L ${x(n - 1).toFixed(1)} ${H - PAD} L ${PAD} ${H - PAD} Z"
+           fill="var(--brass)" opacity="0.09"></path>
+     <path d="${qPath}" fill="none" stroke="var(--brass)" stroke-width="1.8"></path>
+     <path d="${line("r")}" fill="none" stroke="var(--queued)" stroke-width="1.2" opacity=".8"></path>
+     <text x="${W - PAD}" y="${y(max) + 10}" text-anchor="end"
+           fill="var(--faint)" font-size="10" font-family="var(--mono)">${max}</text>`;
+  $("spark-sub").textContent = "last " + fmtAge(n * 1000);
+}
+
+/* ---- jobs table -------------------------------------------------------- */
+async function pollJobs() {
+  try {
+    const data = await (await fetch("/api/jobs?limit=25")).json();
+    const rows = data.jobs.map(j => {
+      const color = STATE_COLOR[j.state] || "var(--muted)";
+      const live = ["QUEUED", "DISPATCHED", "RUNNING", "RETRY_WAIT", "SUBMITTED"].includes(j.state);
+      return `<tr>
+        <td class="mono" style="color:var(--faint)">#${j.id}</td>
+        <td>${j.name}</td>
+        <td><span class="pill" style="color:${color};border-color:${color}">${j.state.toLowerCase()}</span></td>
+        <td class="mono">${j.priority}</td>
+        <td class="mono">${j.attempt}/${1 + j.max_retries}</td>
+        <td class="mono" style="color:var(--muted)">${j.cpu}c ${j.memory_mb}M</td>
+        <td class="mono" style="color:var(--muted)">${fmtAge(serverNow - j.submitted_at_ms)}</td>
+        <td>${live ? `<button class="cancel" data-id="${j.id}" aria-label="Cancel job ${j.id}">×</button>` : ""}</td>
+      </tr>`;
+    });
+    $("jobs").innerHTML = rows.join("") ||
+      `<tr><td colspan="8" class="empty">No jobs yet — submit one above.</td></tr>`;
+  } catch { /* state poll owns the connection dot */ }
+}
+$("jobs").addEventListener("click", async (e) => {
+  const id = e.target.dataset && e.target.dataset.id;
+  if (id) { await fetch("/api/jobs/" + id + "/cancel", { method: "POST" }); pollJobs(); }
+});
+
+/* ---- event feed --------------------------------------------------------- */
+function describe(e) {
+  if (e.type === "JOB_STATE_CHANGED")
+    return `job <b>#${e.job_id}</b> ${e.from.toLowerCase()} → <b>${e.to.toLowerCase()}</b>`;
+  if (e.type === "JOB_SUBMITTED") return `job <b>#${e.job_id}</b> submitted`;
+  if (e.type === "WORKER_REGISTERED") return `worker <b>#${e.worker_id}</b> joined`;
+  if (e.type === "WORKER_MARKED_DEAD") return `worker <b>#${e.worker_id}</b> marked dead`;
+  return e.type.toLowerCase().replaceAll("_", " ");
+}
+function eventColor(e) {
+  if (e.type === "JOB_STATE_CHANGED") return STATE_COLOR[e.to] || "var(--muted)";
+  if (e.type === "WORKER_MARKED_DEAD") return "var(--failed)";
+  return "var(--faint)";
+}
+async function pollEvents() {
+  try {
+    const data = await (await fetch("/api/events?limit=40")).json();
+    const feed = $("feed");
+    const items = data.events.slice().reverse();   // newest first
+    feed.innerHTML = items.map(e => {
+      const key = e.at_ms + "|" + e.type + "|" + (e.job_id || 0) + "|" + (e.to || "");
+      const fresh = !seenEvents.has(key);
+      seenEvents.add(key);
+      return `<div class="evt${fresh ? " fresh" : ""}">
+        <span class="dot" style="background:${eventColor(e)}"></span>
+        <span class="what">${describe(e)}</span>
+        <span class="when">${fmtAge(serverNow - e.at_ms)} ago</span>
+      </div>`;
+    }).join("");
+    $("feed-sub").textContent = items.length + " recent";
+    if (seenEvents.size > 4000) seenEvents.clear();
+  } catch { /* ignore */ }
+}
+
+/* ---- submit ------------------------------------------------------------- */
+$("toggle-drawer").addEventListener("click", () => {
+  const open = $("drawer").classList.toggle("open");
+  $("toggle-drawer").setAttribute("aria-expanded", String(open));
+  $("toggle-drawer").textContent = open ? "Close" : "Submit job";
+});
+$("do-submit").addEventListener("click", async () => {
+  const note = $("submit-note");
+  const payload = "duration_ms=" + (Number($("f-duration").value) || 0) +
+                  ($("f-fail").checked ? ";fail" : "");
+  const body = {
+    name: $("f-name").value || "job",
+    priority: Number($("f-priority").value) || 0,
+    cpu: Number($("f-cpu").value) || 1,
+    memory_mb: Number($("f-mem").value) || 64,
+    max_retries: Number($("f-retries").value) || 0,
+    payload,
+  };
+  if ($("f-deadline").value) body.deadline_ms = Number($("f-deadline").value);
+  try {
+    const response = await fetch("/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    note.classList.toggle("err", !response.ok);
+    note.textContent = response.ok ? "Submitted as #" + result.id : (result.error || "rejected");
+    pollJobs(); pollState();
+  } catch { note.classList.add("err"); note.textContent = "connection failed"; }
+});
+
+/* ---- horology: chronometer, dials, odometers, reveals ------------------- */
+const MOTION_OK = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let lastPollPerf = performance.now();   // for smooth sweep between polls
+
+/* Chronograph dial generator: rings + minute track, reused for the two
+   scroll-reactive backdrops. */
+function buildDial(svg, dense) {
+  const NS = "http://www.w3.org/2000/svg";
+  const ring = (r, w, dash) => {
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("cx", 100); c.setAttribute("cy", 100); c.setAttribute("r", r);
+    c.setAttribute("fill", "none"); c.setAttribute("stroke", "currentColor");
+    c.setAttribute("stroke-width", w);
+    if (dash) c.setAttribute("stroke-dasharray", dash);
+    svg.appendChild(c);
+  };
+  svg.style.color = "#8A93A6";
+  ring(96, .6); ring(78, .4, "1 5"); ring(52, .5); ring(30, .4, "2 4");
+  for (let i = 0; i < 60; i++) {
+    const major = i % 5 === 0;
+    if (!major && !dense) continue;
+    const t = document.createElementNS(NS, "line");
+    t.setAttribute("x1", 100); t.setAttribute("y1", major ? 8 : 10.5);
+    t.setAttribute("x2", 100); t.setAttribute("y2", 14);
+    t.setAttribute("stroke", "currentColor");
+    t.setAttribute("stroke-width", major ? 1.4 : .5);
+    t.setAttribute("transform", `rotate(${i * 6} 100 100)`);
+    svg.appendChild(t);
+  }
+}
+buildDial($("dial-a"), true);
+buildDial($("dial-b"), false);
+
+/* Header watch: 12 bezel ticks once, then hands driven by uptime. */
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const g = $("watch-ticks");
+  for (let i = 0; i < 12; i++) {
+    const t = document.createElementNS(NS, "line");
+    t.setAttribute("x1", 50); t.setAttribute("y1", 9);
+    t.setAttribute("x2", 50); t.setAttribute("y2", i % 3 === 0 ? 17 : 13);
+    t.setAttribute("transform", `rotate(${i * 30} 50 50)`);
+    g.appendChild(t);
+  }
+})();
+
+function setHands(uptimeMs) {
+  const s = uptimeMs / 1000;
+  $("hand-s").style.transform = `rotate(${(s % 60) * 6}deg)`;
+  $("hand-m").style.transform = `rotate(${((s / 60) % 60) * 6}deg)`;
+}
+
+/* One rAF loop: sweeping second hand + slow ambient/scroll dial rotation. */
+let scrollPos = window.scrollY;
+addEventListener("scroll", () => { scrollPos = window.scrollY; }, { passive: true });
+if (MOTION_OK) {
+  const animate = (t) => {
+    if (serverNow) setHands(serverNow + (performance.now() - lastPollPerf));
+    $("dial-a").style.transform = `rotate(${scrollPos * 0.045 + t * 0.0009}deg)`;
+    $("dial-b").style.transform = `rotate(${-(scrollPos * 0.08) - t * 0.0014}deg)`;
+    requestAnimationFrame(animate);
+  };
+  requestAnimationFrame(animate);
+} else {
+  setInterval(() => { if (serverNow) setHands(serverNow); }, 1000);
+}
+
+/* Odometer: departure-board digits. Rebuilds columns only when the digit
+   count changes; otherwise just slides the strips. */
+const DIGIT_H = 36;
+function setOdometer(el, value) {
+  const text = String(Math.max(0, Math.round(value)));
+  if (!MOTION_OK) { el.textContent = text; return; }
+  if (el.dataset.odo !== "1" || el.childElementCount !== text.length) {
+    el.dataset.odo = "1";
+    el.classList.add("odo");
+    el.innerHTML = text.split("").map(() =>
+      `<span class="odo-col">${[0,1,2,3,4,5,6,7,8,9].map(d => `<span>${d}</span>`).join("")}</span>`
+    ).join("");
+  }
+  [...el.children].forEach((col, i) => {
+    col.style.transform = `translateY(${-Number(text[i]) * DIGIT_H}px)`;
+  });
+}
+
+/* Scroll reveals: staggered entrance as panels reach the viewport. */
+if (MOTION_OK && "IntersectionObserver" in window) {
+  let stagger = 0;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      e.target.style.transitionDelay = (stagger++ % 4) * 70 + "ms";
+      e.target.classList.add("in");
+      io.unobserve(e.target);
+    }
+  }, { threshold: 0.12 });
+  document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+} else {
+  document.querySelectorAll(".reveal").forEach((el) => el.classList.add("in"));
+}
+
+/* ---- loops -------------------------------------------------------------- */
+pollState(); pollJobs(); pollEvents();
+setInterval(pollState, 1000);
+setInterval(pollJobs, 2000);
+setInterval(pollEvents, 2000);
+</script>
+</body>
+</html>
